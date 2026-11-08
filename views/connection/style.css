@@ -35,15 +35,12 @@ body {
 header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
 h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.4px; }
 .mark {
-  display: grid;
-  place-items: center;
+  display: block;
   width: 36px;
   height: 36px;
   border-radius: 11px;
-  background: #e7f6eb;
-  color: #15803d;
-  font-size: 19px;
-  font-weight: 700;
+  flex-shrink: 0;
+  object-fit: contain;
 }
 .picker { display: grid; gap: 6px; margin-bottom: 20px; }
 label, dt { color: var(--muted); }

@@ -10,7 +10,7 @@ from test_native_client import VALID_JPEG, client, media_asset, receipt
 
 
 @pytest.mark.parametrize("thread", ["peer", "room@chatroom"])
-async def test_reply_component_sends_native_quote_with_group_auto_mention(serve, tmp_path, thread):
+async def test_reply_component_sends_quote_without_adding_a_mention(serve, tmp_path, thread):
     from astrbot.api.event import MessageChain
     from astrbot.api.message_components import Plain, Reply
 
@@ -26,8 +26,6 @@ async def test_reply_component_sends_native_quote_with_group_auto_mention(serve,
             "text": "同意",
             "quote": {"messageId": "m1", "serverId": "900"},
         }
-        if thread.endswith("@chatroom"):
-            expected["mentions"] = {"userIds": ["user"]}
         assert sent[0][1] == expected
         assert adapter.state.message_status("m1") == "replied"
     finally:
@@ -224,11 +222,11 @@ async def test_incoming_quote_exposes_only_available_embedded_text(
     "kind,subtype,mentioned,expected",
     [
         (49, 57, True, True),
-        (49, 57, False, False),
+        (49, 57, False, True),
         (49, 5, True, False),
     ],
 )
-async def test_incoming_quotes_obey_group_trigger_rules(
+async def test_incoming_quotes_are_not_filtered_by_mentions(
     serve,
     tmp_path,
     kind,
@@ -476,8 +474,13 @@ async def test_quoted_image_fallback_rejects_original_identity_changes(serve, tm
     try:
         await adapter.process_native_event(native_event(msg, "2"))
         await asyncio.gather(*list(adapter._media_tasks))
-        assert queue.empty()
-        assert len(sent) == 1
+        from astrbot.api.message_components import Image
+
+        event = queue.get_nowait()
+        assert event.message_str == msg["body"]
+        assert not any(isinstance(part, Image) for part in event.get_messages())
+        assert event.get_extra("webridge_media_error")
+        assert sent == []
         assert not any(path.endswith("/original-native-id/media") for path in requests)
     finally:
         await adapter.terminate()
@@ -496,8 +499,13 @@ async def test_quoted_image_fallback_requires_original_in_same_chat(
     try:
         await adapter.process_native_event(native_event(msg, "3"))
         await asyncio.gather(*list(adapter._media_tasks))
-        assert queue.empty()
-        assert len(sent) == 1
+        from astrbot.api.message_components import Image
+
+        event = queue.get_nowait()
+        assert event.message_str == msg["body"]
+        assert not any(isinstance(part, Image) for part in event.get_messages())
+        assert event.get_extra("webridge_media_error")
+        assert sent == []
         assert not any(path.endswith("/original-native-id") for path in requests)
         assert not any("unknown-server" in path for path in requests)
     finally:
@@ -552,8 +560,13 @@ async def test_quoted_image_fallback_does_not_mask_other_native_errors(
     try:
         await adapter.process_native_event(native_event(msg, "2"))
         await asyncio.gather(*list(adapter._media_tasks))
-        assert queue.empty()
-        assert len(sent) == 1
+        from astrbot.api.message_components import Image
+
+        event = queue.get_nowait()
+        assert event.message_str == msg["body"]
+        assert not any(isinstance(part, Image) for part in event.get_messages())
+        assert event.get_extra("webridge_media_error")
+        assert sent == []
         assert not any(path.endswith("/original-native-id") for path in requests)
     finally:
         await adapter.terminate()
@@ -619,140 +632,14 @@ async def test_quoted_image_fallback_obeys_media_deadline(serve, tmp_path):
     try:
         await adapter.process_native_event(native_event(msg, "2"))
         await asyncio.wait_for(asyncio.gather(*list(adapter._media_tasks)), 0.5)
-        assert queue.empty()
-        assert len(sent) == 1
-        assert adapter.state.message_status(msg["id"]) == "replied"
+        from astrbot.api.message_components import Image
+
+        event = queue.get_nowait()
+        assert event.message_str == msg["body"]
+        assert not any(isinstance(part, Image) for part in event.get_messages())
+        assert event.get_extra("webridge_media_error")
+        assert sent == []
+        assert adapter.state.message_status(msg["id"]) == "queued"
     finally:
         release.set()
-        await adapter.terminate()
-
-
-@pytest.mark.parametrize(
-    "mode,mentioned,body,expected_prompt",
-    [
-        ("mention", True, "@机器人\u2005帮我分析这张图", "帮我分析这张图"),
-        ("mention", True, "@机器人\u2005", "请描述这张图片的内容。"),
-        ("all", True, "@机器人\u2005看看", "看看"),
-        ("mention", False, "帮我分析这张图", None),
-        ("all", False, "帮我分析这张图", None),
-        ("disabled", True, "@机器人\u2005帮我分析这张图", None),
-    ],
-)
-async def test_group_quoted_image_requires_genuine_mention_even_in_all_mode(
-    serve, tmp_path, mode, mentioned, body, expected_prompt
-):
-    import asyncio
-
-    from astrbot.api.message_components import At, Image, Plain, Reply
-
-    media_requests = []
-    msg = message(
-        threadId="room@chatroom",
-        type=49,
-        appMessageType=57,
-        body=body,
-        mentions={"state": "known", "self": mentioned},
-        quote={
-            "serverId": "899",
-            "type": 3,
-            "state": "embedded",
-            "senderId": "author",
-            "embeddedImage": True,
-        },
-    )
-
-    async def custom_serve(default_handler):
-        async def handler(req):
-            if "/media" in req.path:
-                media_requests.append(req.path)
-            return await default_handler(req)
-
-        return await serve(handler)
-
-    adapter, queue, _, _ = await make_adapter(custom_serve, tmp_path, msg, group_reply_mode=mode)
-    try:
-        await adapter.process_native_event(native_event(msg))
-        if expected_prompt is None:
-            assert not adapter._media_tasks
-            assert queue.empty()
-            assert media_requests == []
-        else:
-            event = await asyncio.wait_for(queue.get(), 1)
-            assert event.message_str == expected_prompt
-            assert [type(c) for c in event.get_messages()] == [At, Reply, Plain, Image]
-            assert len(media_requests) == 2
-    finally:
-        await adapter.terminate()
-
-
-async def test_group_summary_command_on_quoted_image_skips_media_download(serve, tmp_path):
-    media_requests = []
-    msg = message(
-        threadId="room@chatroom",
-        type=49,
-        appMessageType=57,
-        body="@机器人\u2005总结群聊",
-        mentions={"state": "known", "self": True},
-        quote={
-            "serverId": "899",
-            "type": 3,
-            "state": "embedded",
-            "senderId": "author",
-            "embeddedImage": True,
-        },
-    )
-
-    async def custom_serve(default_handler):
-        async def handler(req):
-            if "/media" in req.path:
-                media_requests.append(req.path)
-            return await default_handler(req)
-
-        return await serve(handler)
-
-    adapter, queue, _, _ = await make_adapter(
-        custom_serve, tmp_path, msg, enable_group_summary=True
-    )
-    try:
-        await adapter.process_native_event(native_event(msg))
-        assert not adapter._media_tasks
-        event = queue.get_nowait()
-        assert event.message_str == "总结群聊"
-        assert media_requests == []
-    finally:
-        await adapter.terminate()
-
-
-@pytest.mark.parametrize(
-    "quote_state,embedded,expected_reply",
-    [
-        ("missing", False, ["引用的图片已失效，请重新发送。"]),
-        ("recalled", False, []),
-    ],
-)
-async def test_expired_or_recalled_quoted_image_obeys_quote_protection(
-    serve, tmp_path, quote_state, embedded, expected_reply
-):
-    import asyncio
-
-    msg = message(
-        type=49,
-        appMessageType=57,
-        body="帮我看看这张图",
-        quote={
-            "serverId": "899",
-            "type": 3,
-            "state": quote_state,
-            "senderId": "author",
-            "embeddedImage": embedded,
-        },
-    )
-    adapter, queue, _, sent = await make_adapter(serve, tmp_path, msg)
-    try:
-        await adapter.process_native_event(native_event(msg))
-        await asyncio.gather(*list(adapter._media_tasks))
-        assert queue.empty()
-        assert [payload["text"] for _, payload in sent] == expected_reply
-        assert adapter.state.message_status("m1") == ("replied" if expected_reply else "no_reply")
-    finally:
         await adapter.terminate()

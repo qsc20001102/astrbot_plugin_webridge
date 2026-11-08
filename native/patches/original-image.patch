@@ -1,0 +1,1766 @@
+diff --git a/.changeset/webridge-original-images.md b/.changeset/webridge-original-images.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..0be83a23a800551be976af7446314a9a06abbdfd
+--- /dev/null
++++ b/.changeset/webridge-original-images.md
+@@ -0,0 +1,5 @@
++---
++"@agent-wechat/cli": patch
++---
++
++Preserve source JPEG originals and full image dimensions when preparing image messages. Upload larger originals in bounded chunks while keeping smaller standard and thumbnail previews. Existing saved image preparation modes retain their previous behavior.
+diff --git a/.changeset/webridge-video-policy.md b/.changeset/webridge-video-policy.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..52a69b87f5103c2fe6826c8c55c68eb4eaf06484
+--- /dev/null
++++ b/.changeset/webridge-video-policy.md
+@@ -0,0 +1,5 @@
++---
++"@agent-wechat/cli": patch
++---
++
++Ignore automatic downloads of received videos and their thumbnails, including queued work from previous versions. Remove the 50 MiB source and 25 MiB playback policies for sent videos. Preserve compatible MP4 sources without size, dimension or frame-rate targets, and convert incompatible codecs at source dimensions and frame rate without a bitrate or file-size budget. Keep descriptor integer bounds, account authorization, integrity, cancellation, idempotency, uncertain receipts and recovery checks. This does not establish WeChat server acceptance or recipient playback for arbitrary large videos.
+diff --git a/.changeset/webridge-video-quality.md b/.changeset/webridge-video-quality.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d13f6b403de82d134761ab0d6268d9a42ad2bcd
+--- /dev/null
++++ b/.changeset/webridge-video-quality.md
+@@ -0,0 +1,5 @@
++---
++"@agent-wechat/cli": patch
++---
++
++Preserve compatible H.264/AAC MP4 playback bytes within the existing upload limit. Prepare other movie sources up to a 1920x1080 or 1080x1920 playback envelope with source frame rates up to 60fps and a higher bounded quality budget. Keep complete-video, cancellation, decoder, size, idempotency and readback checks.
+diff --git a/docs/src/content/docs/use/quality.mdx b/docs/src/content/docs/use/quality.mdx
+index 860fde101d36bbaf7a0fc84e4e87802559c3f588..e0d99286964d7039d311a23ef7e152b583ec14cf 100644
+--- a/docs/src/content/docs/use/quality.mdx
++++ b/docs/src/content/docs/use/quality.mdx
+@@ -16,11 +16,11 @@ Choose outgoing preparation when sending, then select a received variant when do
+ | Video, original send | Playback and thumbnail, plus unchanged `original` |
+ | Ordinary file | Unchanged source bytes |
+ 
+-**Images:** the sender preserves a JPEG source only when it is at most 65,520 bytes. Otherwise it creates a JPEG starting at a 1,280-pixel longest edge. Standard and thumbnail copies start at 640 and 160 pixels. Preparation lowers JPEG quality and, if needed, dimensions to fit each copy within 65,520 bytes. The image source limit is 26,214,383 bytes.
++**Images in this patched build:** the original copy preserves a valid JPEG source unchanged, up to the image source limit of 26,214,383 bytes. Other formats become a full-size JPEG at quality 98, reducing quality to 95, 92 or 90 only if needed to fit; preparation does not shrink the original. Standard and thumbnail copies still start at 640 and 160 pixels and lower quality or dimensions to fit within 65,520 bytes. Larger originals upload in chunks.
+ 
+-Large RGB or grayscale JPEG photos can contain up to 64 million pixels, with neither dimension exceeding 8,192 pixels. They decode at reduced resolution before preparation. Other image formats keep the 16,777,216-pixel limit. To preserve a larger photo unchanged, send it as a file attachment.
++Large RGB or grayscale JPEG photos can contain up to 64 million pixels, with neither dimension exceeding 8,192 pixels. They decode at reduced resolution for validation and previews while their original bytes remain unchanged. Other image formats keep the 16,777,216-pixel limit. PNG conversion does not preserve source bytes or transparency. Existing saved image jobs keep their recorded preparation behavior.
+ 
+-**Video:** MOV, MP4, 3GP, 3G2 and MJ2 sources allow **50 MiB (52,428,800 bytes)**. The desktop and web attachment picker checks the connected hub's limit; the synthetic preview has a smaller limit. Playback uses H.264 Main, at most 720 pixels on the longest edge and 30 fps, with AAC audio when present. Preparation checks the complete output and rejects videos that cannot fit; it never shortens them. Container support depends on the codecs inside the file.
++**Video in this patched build:** received videos and thumbnails are not automatically downloaded. Sent MOV-family videos no longer use the former 50 MiB source / 25 MiB playback policy. Compatible H.264/AAC MP4 sources keep their exact bytes regardless of size, dimensions or frame rate. Other sources use H.264/AAC conversion at source dimensions and frame rate, CRF 18, without a bitrate budget or file-size target. Integer representation, format, completeness, integrity, cancellation and resource guards remain. This does not establish arbitrary-size server acceptance: the daemon still buffers bytes and uses SQLite staging, and server, memory, disk, storage and decoder capacity may fail earlier. Recipient playback requires separate validation.
+ 
+ In the desktop or web composer, select **Original media quality** to include the unchanged video source alongside the prepared playback copy. The adjacent hint explains this option. It applies to all videos in the staged batch. Leave it unchecked to send playback and thumbnail only.
+ 
+@@ -33,7 +33,7 @@ In the desktop or web composer, select **Original media quality** to include the
+      --idempotency-key photo --wait 3600
+    ```
+ 
+-   There is no image equivalent of `--video-quality`. For unchanged image bytes, use `--file ./photo.jpg`; the recipient receives a file attachment.
++   There is no image equivalent of `--video-quality`. JPEG originals are preserved automatically; other formats are converted. Use `--file` when exact bytes of a non-JPEG source must be preserved as a file attachment.
+ 
+ 2. Choose video preparation:
+ 
+@@ -44,7 +44,7 @@ In the desktop or web composer, select **Original media quality** to include the
+      --idempotency-key clip-original --wait 3600
+    ```
+ 
+-3. Inspect the returned job with `wx jobs get JOB_ID`. Successful submission reports `state: "accepted"`; inspect `result.uploadReadbackVerified`. Image jobs also report `result.imagePreparation.sourcePreserved`.
++3. Inspect the returned job with `wx jobs get JOB_ID`. Successful submission reports `state: "accepted"`; inspect `result.uploadReadbackVerified`. Image jobs also report `result.imagePreparation.sourcePreserved`. New video jobs report `result.videoPreparation.sourcePreserved` and the source/playback SHA-256 values; existing saved preparation is reused during recovery.
+ 
+ ### HTTP API and SDK
+ 
+diff --git a/docs/src/content/docs/use/settings.mdx b/docs/src/content/docs/use/settings.mdx
+index 697d4c5de76f0db36eebee32a67791e3bfa1fae4..15e79349e2638078fe805ec1e540f60a340e5ddf 100644
+--- a/docs/src/content/docs/use/settings.mdx
++++ b/docs/src/content/docs/use/settings.mdx
+@@ -34,10 +34,10 @@ being open. Each account has its own size limit, initially **50 MB (52,428,800 b
+ 
+ | Content | Automatic download |
+ | --- | --- |
+-| Image and video thumbnails | Always, when a source is provided |
++| Image thumbnails | Always, when a source is provided |
+ | Voice notes | Always, in playback format |
+ | Standard and original images | Each version whose advertised size is within the limit |
+-| Standard and original videos | Each version whose advertised size is within the limit |
++| Videos and video thumbnails in this patched build | Never automatically downloaded |
+ | Files and stickers | When their advertised size is within the limit |
+ | Larger or unknown-size versions | On request |
+ 
+diff --git a/packages/native-client-rust/Cargo.lock b/packages/native-client-rust/Cargo.lock
+index 7f092226bf569ecffff76b073b49d18edc4e3760..2f2ccfd7c0c4252e7e41365ba1cd01da2778841d 100644
+--- a/packages/native-client-rust/Cargo.lock
++++ b/packages/native-client-rust/Cargo.lock
+@@ -2837,6 +2837,7 @@ version = "1.5.1"
+ dependencies = [
+  "anyhow",
+  "image",
++ "jpeg-decoder",
+  "libc",
+  "md-5",
+  "serde",
+diff --git a/packages/native-client-rust/FEATURES.md b/packages/native-client-rust/FEATURES.md
+index a3482bdbac023de62e122cb39a7f92088d8c65f3..14e050d8d72b49a8db9f22a28693c901b5efec8d 100644
+--- a/packages/native-client-rust/FEATURES.md
++++ b/packages/native-client-rust/FEATURES.md
+@@ -48,7 +48,7 @@ from fixture tests. Capability responses must reflect these limits.
+ | Whole-thread reads, optimistic version checking and cross-device notification | Implemented | Frozen local ordering boundary, expected-version check, local clear watermark and durable one-attempt native notification; accepted, rejected and uncertain outcomes remain distinct. Reading a thread includes earlier messages that were not model input. Strict incoming opcode 1 controls have a separate local projection. Recognized opcode 2 and 5 controls can clear unread state once for existing visible ordinary sessions; interrupted attempts remain uncertain, and the complete session-entry/exit controls remain blocked. Entry reads emit `thread.read-state` with `origin: remote_entry_read` and `completeControl: false`; friend-request sessions remain outside the entry subset. Encrypted direct/group fixtures preserve newer unread rows, drafts, visibility and ordering across replay. Canonical positive 64-bit last-message timestamps are accepted as metadata; the local cutoff still uses the notification's whole seconds. Same-second arrivals and live phone comparison need separate validation |
+ | Incoming image qualities, normal/original video, file, short voice | Implemented | Three distinct JPEG qualities passed native download/hash/HTTP range checks. Normal H.264 video (720×960, 882,298 bytes) and original HEVC (1440×1080, 10,034,538 bytes) downloaded and decoded. An incoming PDF advertising file encryption version 0 downloaded through the native CDN with exact advertised size and MD5; discovery fixtures retain strict checks for versions 0/1 and reject unknown/malformed metadata. Broader media/playback coverage remains separate |
+ | Automatic caching of newly received voice notes | Implemented | Receipt-time source-bound queue, restart, replay, cancellation, recall, malformed metadata and queue-capacity fixtures. The isolated daemon produced available WAV and `media.ready` without a client transfer request. Normal download jobs run independently of UI visibility; local repair does not schedule transfers. Live receipt-time acceptance remains separate |
+-| Per-account automatic media downloads | Implemented; synthetic validation | Hub registry setting defaults to 50 MiB; API/SDK and `wx accounts settings` read/update it. Image/video thumbnails and playback voice bypass the threshold; other supported image/video/file/sticker variants require a known advertised size within it. Pending receipt work rechecks current policy; manual transfers remain available. Official profiles are not used to store this policy. Browser and isolated simulator checks are separate from live receipt-time acceptance |
++| Per-account automatic media downloads | Implemented; synthetic validation | Hub registry setting defaults to 50 MiB; API/SDK and `wx accounts settings` read/update it. Image thumbnails and playback voice bypass the threshold. This patched build skips video and its thumbnails, including previously pending work; other supported image/file/sticker variants require a known advertised size within it. Pending receipt work rechecks current policy; manual transfers remain available. Official profiles are not used to store this policy. Browser and isolated simulator checks are separate from live receipt-time acceptance |
+ | Incoming WXGF source retention and representative still previews | Implemented for observed v2 containers | Twelve saved official samples decoded through the shared Rust/FFmpeg path and exactly re-encoded to their DAT bytes. Synthetic original/standard/thumbnail cache tests retain WXGF sources; Gateway fixtures verify a separately hashed JPEG reaches vision. Source animation/timing/alpha and official-client rendering remain unverified |
+ | Eligible incoming original sticker bytes, animation/integrity bounds | Implemented | Restricted pinned source, size/integrity and complete-frame fixtures; no sticker-send substitution or pack support |
+ | Received shared stickers and compact quotes | Implemented; bounded receive validation | Application subtype 8 decodes the received EmojiInfo original source only when its MD5 agrees with appattach, using the existing allowlisted, pinned and size/hash/frame-checked sticker pipeline. Valid thumbnails remain independent. A retained shared GIF source and its embedded quote each downloaded through the hub with 1,630,293 bytes, 51 validated frames and matching HTTP content hashes. The source also matched the advertised size and both MD5 identities; no official runtime or send was used for those retrievals. Ordinary/shared sticker quotes and article/music/video quote cards use only embedded parent content. Encrypted-profile fixtures check reply-owned media, account isolation and recall denial; native WebView fixtures check compact rendering and navigation without original-message requests. Alternate/encrypted sticker sources, sticker sending and pack discovery remain unsupported |
+@@ -68,6 +68,7 @@ from fixture tests. Capability responses must reflect these limits.
+ | Outgoing image/file/video/independently encoded voice | Implemented | Fresh native File Transfer submissions accepted all four kinds and committed history rows; all four supported official caches/resource joins complete after local repair. CDN readback checked before final CGI; the account owner confirmed the latest file/image open and video/voice playback |
+ | Large outgoing JPEG preparation | Implemented; synthetic validation | RGB/grayscale JPEG sources up to 64 million pixels and 8192 pixels per edge use reduced-resolution IDCT decoding above the existing 16,777,216-pixel full-decode limit. Synthetic 50 MP baseline/progressive fixtures verify preparation and valid original/standard/thumbnail output; the source-byte limit and prepared copy limits remain unchanged. Other formats retain their existing decode limits. Invalid/oversized inputs report fixed error codes and the UI gives actionable guidance without resending. This does not establish original-source preservation or recipient rendering for large photos |
+ | Ordinary-file attachments through 512 MiB | Implemented for fresh cache misses; 512 MiB live validation in progress | Isolated Linux x64 File Transfer validation accepted 32 MiB and 50 MiB PDFs after exact upload readback. The recipient downloaded/opened both and confirmed their visible codes. Both passed cold CLI/SDK full hashes, correct HTTP 206 ranges, same-key one-attempt checks and official-profile history/media writeback. The 50 MiB control also passed real OpenClaw storage and file-reference manifest verification. A 512 MiB object passed independent readback, but the final-client job stopped in readback on both attempts before message submission. Recipient-exported SHA-256 is unavailable. Exact padding/routing results and memory/disk measurements are recorded in the validation note. Image/voice source limits remain 26,214,383 bytes; video modes have their own limit below. No group or live ARM64 claim follows |
++| Playback quality and receive policy in this patched build | Implemented; offline validation | No 50 MiB source / 25 MiB playback, resolution, frame-rate or duration policy. Compatible H.264/AAC MP4 retains source bytes; other codecs are prepared at source dimensions/frame rate without a size/bitrate budget. Received videos and thumbnails never auto-download. Fixtures exercise source bytes above the former 50 MiB threshold, 4K/120fps preservation, 4K conversion, correlated chunks, pending receive work, identity and receipt guards. Existing live controls below describe the older policy; new recipient playback and large-video server acceptance remain unverified. |
+ | Normal/original MOV-family video sends through 50 MiB source size | Implemented; MP4 controls validated on Linux x64, additional containers validated synthetically | Normal mode prepares a complete H.264/AAC playback copy below 26,214,383 bytes plus thumbnail. Original mode also uploads unchanged source bytes as a separate type4 object and reads all objects back before CGI149. Saved preparation, separate upload material, CLI/API/SDK/OpenClaw options and strict large-video retrieval have synthetic coverage. The built Linux x64 daemon accepted the normal control in one attempt with full readback and complete local writeback; the account owner confirmed video/audio/code. The first original control stopped on readback metadata before submission and remains retained. A corrected-image control accepted in one attempt after all three object readbacks; cold SDK/CLI original bytes and copied encrypted history/XML/resource31/32/33/hardlink/cache checks match the exact 50 MiB source. The account owner confirmed the final original-mode File Transfer video; recipient-exported SHA-256 remains unavailable. Synthetic MP4/H.264, MOV/MJPEG (with and without `ftyp`), 3GP/3G2 MPEG-4 and MJ2/JPEG2000 sources pass preparation, thumbnail and exact original-byte tests. The built CLI/API simulator and a fresh non-root/read-only/no-network image verify legacy MOV normal/original sends, readback, complete profile writeback, unchanged original download, MIME/extension and same-key replay. Desktop/web detection and Original selection have frontend tests; new container recipient playback and installed-app validation remain separate. See the video validation note |
+ | Voice splitting and per-note partial/uncertain receipts | Implemented; phone playback pending for notes above 32 KiB | Independent codec; one note holds up to 60 seconds (the official limit) and longer audio splits into the fewest equal-length notes, with per-note IDs/status and stop after uncertainty. A note above 32 KiB of SILK (about 15 seconds) is uploaded as consecutive offset/length ranges of one client message ID, with the end flag on the last range. A controlled live check on 2026-10-22 sent File Transfer notes of 10, 30 and 60 seconds and 90 seconds of audio (two 45-second notes); every note returned server acceptance with a server message ID. Phone playback of the multi-range notes is not yet confirmed. Single-note phone playback was confirmed for notes of up to 10 seconds. The voice upload cancellation/format fields have since been corrected for new sends. A corrected-build 3.6-second, single-range note reached the receiving profile with SILK format 4 on 2026-10-28, and the recipient confirmed phone playback. Corrected-build multi-range playback remains unverified |
+ | Bounded local media writeback repair | Implemented | Actual CLI repaired nine retained candidates with zero blocked; all four accepted media sends now report complete. Uses owned bytes/receipts without a transfer or resend |
+diff --git a/packages/native-client-rust/crates/wechat-api/src/actions.rs b/packages/native-client-rust/crates/wechat-api/src/actions.rs
+index fa42baefe766b62c7a6c6729f05d6bf3cce98921..9df51a1cd88bb310c0e572854bed62935198c60a 100644
+--- a/packages/native-client-rust/crates/wechat-api/src/actions.rs
++++ b/packages/native-client-rust/crates/wechat-api/src/actions.rs
+@@ -137,7 +137,7 @@ async fn capabilities(
+         ));
+     }
+     Ok(Json(
+-        json!({"nativeRuntime":true,"officialBinaryRequired":false,"textMentions":true,"inlineTextMentions":true,"quotedTextSend":true,"quotedTextSendScopes":["read","send"],"quotedTextSendLiveValidated":false,"mediaUploadMaxBytes":wechat_core::MAX_SOURCE_BYTES,"mediaSendMaxBytes":media_send_max_bytes(),"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some(),"groupMutations":["create","rename","leave","add_members","remove_members","my_name","clear_announcement"],"groupMutationScope":"admin","groupCreateMinSelectedMembers":2,"groupMutationMaxSelectedMembers":40,"threadNotificationTargets":["direct","group"],"threadPinningTargets":["direct","group"],"threadPinningScope":"admin","incomingGroupUpdates":"partial"}),
++        json!({"nativeRuntime":true,"officialBinaryRequired":false,"textMentions":true,"inlineTextMentions":true,"quotedTextSend":true,"quotedTextSendScopes":["read","send"],"quotedTextSendLiveValidated":false,"mediaUploadMaxBytes":wechat_core::MAX_UPLOAD_SOURCE_BYTES,"mediaSendMaxBytes":media_send_max_bytes(),"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some(),"groupMutations":["create","rename","leave","add_members","remove_members","my_name","clear_announcement"],"groupMutationScope":"admin","groupCreateMinSelectedMembers":2,"groupMutationMaxSelectedMembers":40,"threadNotificationTargets":["direct","group"],"threadPinningTargets":["direct","group"],"threadPinningScope":"admin","incomingGroupUpdates":"partial"}),
+     ))
+ }
+ fn media_send_max_bytes() -> Value {
+@@ -394,14 +394,20 @@ mod tests {
+         let body: Value =
+             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                 .unwrap();
+-        assert_eq!(body["mediaUploadMaxBytes"], 536_870_912);
++        assert_eq!(
++            body["mediaUploadMaxBytes"],
++            wechat_core::MAX_UPLOAD_SOURCE_BYTES
++        );
+         assert_eq!(body["quotedTextSend"], true);
+         assert_eq!(body["quotedTextSendScopes"], json!(["read", "send"]));
+         assert_eq!(body["quotedTextSendLiveValidated"], false);
+         assert_eq!(body["textMentions"], true);
+         assert_eq!(body["inlineTextMentions"], true);
+         assert_eq!(body["mediaSendMaxBytes"]["file"], 536_870_912);
+-        assert_eq!(body["mediaSendMaxBytes"]["video"], 52_428_800);
++        assert_eq!(
++            body["mediaSendMaxBytes"]["video"],
++            wechat_core::MAX_VIDEO_SOURCE_BYTES
++        );
+         for kind in ["image", "voice"] {
+             assert_eq!(body["mediaSendMaxBytes"][kind], 26_214_383);
+         }
+diff --git a/packages/native-client-rust/crates/wechat-api/src/contracts.rs b/packages/native-client-rust/crates/wechat-api/src/contracts.rs
+index de61f1d80011f038c996d95c2d834550d8b62375..e0580cd394a41d17881a35480f95381f422f5dc8 100644
+--- a/packages/native-client-rust/crates/wechat-api/src/contracts.rs
++++ b/packages/native-client-rust/crates/wechat-api/src/contracts.rs
+@@ -631,7 +631,7 @@ mod tests {
+         let generated = typescript();
+         assert!(generated.contains("NATIVE_MAX_SOURCE_BYTES = 536870912 as const"));
+         assert!(generated.contains("NATIVE_MAX_ORDINARY_SOURCE_BYTES = 26214383 as const"));
+-        assert!(generated.contains("NATIVE_MAX_VIDEO_SOURCE_BYTES = 52428800 as const"));
++        assert!(generated.contains("NATIVE_MAX_VIDEO_SOURCE_BYTES = 4294967279 as const"));
+         assert!(generated.contains("videoQuality?: VideoSendQuality"));
+         assert!(generated.contains("serverId: string | null"));
+         assert!(generated.contains("unreadCount: number | null"));
+diff --git a/packages/native-client-rust/crates/wechat-api/src/media.rs b/packages/native-client-rust/crates/wechat-api/src/media.rs
+index 67d7045cb03843aabbc6a880e67887b8ae45f667..7c5b9f58fcb49212ebdd442ffe1eb05e2a68cbb3 100644
+--- a/packages/native-client-rust/crates/wechat-api/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-api/src/media.rs
+@@ -1,26 +1,29 @@
+ //! Bounded owned uploads and account-scoped media jobs and bytes.
+ use super::*;
+ use axum::extract::Multipart;
+-use wechat_core::{MediaSendRequest, MediaTransferRequest, MAX_SOURCE_BYTES};
++use wechat_core::{MediaSendRequest, MediaTransferRequest, MAX_UPLOAD_SOURCE_BYTES};
+ 
+ fn validate_upload_chunk(current: usize, next: usize) -> ApiResult<()> {
+     if current
+         .checked_add(next)
+-        .is_none_or(|n| n > MAX_SOURCE_BYTES)
++        .is_none_or(|n| n > MAX_UPLOAD_SOURCE_BYTES)
+     {
+         return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "upload_too_large"));
+     }
+     Ok(())
+ }
+ fn upload_capacity(current: usize, needed: usize) -> usize {
+-    current.saturating_mul(2).max(needed).min(MAX_SOURCE_BYTES)
++    current
++        .saturating_mul(2)
++        .max(needed)
++        .min(MAX_UPLOAD_SOURCE_BYTES)
+ }
+ 
+ pub(super) fn routes() -> Router<App> {
+     Router::new()
+         .route(
+             "/v1/accounts/{a}/uploads",
+-            post(upload).layer(DefaultBodyLimit::max(MAX_SOURCE_BYTES + 64 * 1024)),
++            post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD_SOURCE_BYTES + 64 * 1024)),
+         )
+         .route("/v1/accounts/{a}/messages/{id}/media", get(assets))
+         .route(
+@@ -502,11 +505,11 @@ mod tests {
+     }
+     #[test]
+     fn upload_chunk_limit_accepts_exact_maximum_and_rejects_overflow_without_allocation() {
+-        assert!(validate_upload_chunk(MAX_SOURCE_BYTES - 1, 1).is_ok());
+-        assert!(validate_upload_chunk(MAX_SOURCE_BYTES, 0).is_ok());
++        assert!(validate_upload_chunk(MAX_UPLOAD_SOURCE_BYTES - 1, 1).is_ok());
++        assert!(validate_upload_chunk(MAX_UPLOAD_SOURCE_BYTES, 0).is_ok());
+         for (current, next) in [
+-            (MAX_SOURCE_BYTES, 1),
+-            (0, MAX_SOURCE_BYTES + 1),
++            (MAX_UPLOAD_SOURCE_BYTES, 1),
++            (0, MAX_UPLOAD_SOURCE_BYTES + 1),
+             (usize::MAX, 1),
+         ] {
+             assert_eq!(
+@@ -516,8 +519,8 @@ mod tests {
+         }
+         // Multipart chunk boundaries need not align with powers of two.
+         assert_eq!(
+-            upload_capacity(MAX_SOURCE_BYTES - 37, MAX_SOURCE_BYTES),
+-            MAX_SOURCE_BYTES
++            upload_capacity(MAX_UPLOAD_SOURCE_BYTES - 37, MAX_UPLOAD_SOURCE_BYTES),
++            MAX_UPLOAD_SOURCE_BYTES
+         );
+         assert_eq!(upload_capacity(100, 110), 200);
+         assert_eq!(upload_capacity(0, 37), 37);
+diff --git a/packages/native-client-rust/crates/wechat-core/src/media.rs b/packages/native-client-rust/crates/wechat-core/src/media.rs
+index bc57e0a366d43364ade22c3b66cd97f6ccfe9936..b201dd5bf8582fde60e6085f84bc00bf74723030 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/media.rs
+@@ -115,11 +115,12 @@ struct SendPlan {
+     #[serde(default)]
+     reuse_completed_upload: Option<CompletedUploadReuse>,
+ }
+-#[derive(Clone, Copy, Default, Serialize, Deserialize)]
++#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+ enum ImageVariantSizing {
+     #[default]
+     Legacy,
+     DownscaleOnly,
++    PreserveOriginal,
+ }
+ #[derive(Clone, Serialize, Deserialize)]
+ struct CompletedUploadReuse {
+@@ -337,7 +338,7 @@ impl Core {
+     ) -> Result<OwnedMediaSource> {
+         self.store.account(account)?;
+         ensure!(
+-            !bytes.is_empty() && bytes.len() <= MAX_SOURCE_BYTES,
++            !bytes.is_empty() && bytes.len() <= MAX_UPLOAD_SOURCE_BYTES,
+             "source_size_limit"
+         );
+         ensure!(
+@@ -571,6 +572,19 @@ impl Core {
+                 continue;
+             }
+             for id in self.store.queued_media_jobs(&account.id)? {
++                let row = self.store.media_job(&account.id, &id)?;
++                if row.kind == "download" {
++                    let video = row.data["assetId"]
++                        .as_str()
++                        .and_then(|asset| self.store.media_asset(&account.id, asset).ok())
++                        .is_some_and(|stored| stored.metadata["kind"] == "video");
++                    if video {
++                        // Do not resume downloads from the former video
++                        // receive pipeline. Outgoing readback uses send jobs.
++                        self.store.cancel_media_job(&account.id, &id)?;
++                        continue;
++                    }
++                }
+                 self.spawn_media_worker(&account.id, &id);
+                 n += 1;
+             }
+@@ -976,7 +990,7 @@ impl Core {
+             "invalid_media_idempotency_key"
+         );
+         ensure!(
+-            request.play_seconds.is_none_or(|n| n > 0 && n <= 3600),
++            request.play_seconds.is_none_or(|n| n > 0),
+             "invalid_video_duration"
+         );
+         ensure!(
+@@ -2557,6 +2571,7 @@ impl Core {
+                     "sourceSha256": source.sha256,
+                     "normalSha256": digest(&normal),
+                     "normalBytes": normal.len(),
++                    "sourcePreserved": normal.as_slice() == bytes.as_slice(),
+                     "originalIncluded": plan.request.video_quality == Some(VideoSendQuality::Original)
+                 });
+                 self.store.save_media_job(account, &row)?;
+@@ -2739,7 +2754,7 @@ impl Core {
+                         .map(|s| self.source_bytes(account, s))
+                         .transpose()?
+                         .map(|v| v.1);
+-                    let sizing = ImageVariantSizing::DownscaleOnly;
++                    let sizing = ImageVariantSizing::PreserveOriginal;
+                     let (original, standard, thumbnail) =
+                         image_variants(&bytes, standard, thumb, sizing)?;
+                     let inspection = wechat_protocol::media::inspect_image(&original)?;
+@@ -2757,7 +2772,9 @@ impl Core {
+                     )?;
+                     self.phase_media(account, id, "uploading")?;
+                     self.progress_media(account, id, 0, Some(original.len() as u64))?;
+-                    let uploaded = cdn.upload_image(&prepared)?;
++                    let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
++                        cdn.upload_image(&prepared, &callback)
++                    })?;
+                     plan.uploaded_image = Some(uploaded);
+                     plan.image_variant_sizing = sizing;
+                     self.save_send_plan(account, id, &plan)?;
+@@ -2773,10 +2790,7 @@ impl Core {
+                     );
+                     bytes.clone()
+                 };
+-                ensure!(
+-                    normal.len() <= MAX_ORDINARY_SOURCE_BYTES,
+-                    "source_size_limit"
+-                );
++                ensure!(normal.len() <= MAX_VIDEO_SOURCE_BYTES, "source_size_limit");
+                 if plan.uploaded_video.is_none() {
+                     ensure!(
+                         normal.len() >= 12 && normal[4..8] == *b"ftyp",
+@@ -3327,15 +3341,33 @@ fn image_variants(
+     sizing: ImageVariantSizing,
+ ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+     let decoded = decode_send_image(bytes)?;
+-    let original = if bytes.len() <= 65520
++    let preserve = sizing == ImageVariantSizing::PreserveOriginal;
++    let original = if (preserve || bytes.len() <= 65520)
+         && image::guess_format(bytes)? == image::ImageFormat::Jpeg
+         && wechat_protocol::media::inspect_image(bytes).is_ok()
+     {
+         bytes.to_vec()
++    } else if preserve {
++        let rgb = decoded.to_rgb8();
++        let mut encoded = None;
++        for quality in [98, 95, 92, 90] {
++            let mut candidate = vec![];
++            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut candidate, quality)
++                .encode_image(&rgb)?;
++            if candidate.len() <= MAX_ORDINARY_SOURCE_BYTES {
++                encoded = Some(candidate);
++                break;
++            }
++        }
++        encoded.context("unsupported_image_size")?
+     } else {
+         fit_jpeg(&decoded, 1280, 65520, sizing)?
+     };
+-    let original_image = image::load_from_memory(&original)?;
++    let original_image = if preserve {
++        decoded
++    } else {
++        image::load_from_memory(&original)?
++    };
+     let supplied_jpeg = |raw: Vec<u8>| -> Result<Vec<u8>> {
+         ensure!(
+             raw.len() <= 65520 && image::guess_format(&raw)? == image::ImageFormat::Jpeg,
+@@ -3433,7 +3465,9 @@ fn fit_jpeg(
+ ) -> Result<Vec<u8>> {
+     let input_edge = match sizing {
+         ImageVariantSizing::Legacy => u32::MAX,
+-        ImageVariantSizing::DownscaleOnly => image.width().max(image.height()),
++        ImageVariantSizing::DownscaleOnly | ImageVariantSizing::PreserveOriginal => {
++            image.width().max(image.height())
++        }
+     };
+     for edge in [max_edge, max_edge / 2, max_edge / 4, max_edge / 8] {
+         let edge = edge.max(1).min(input_edge);
+@@ -3714,7 +3748,7 @@ fn video_duration(input: &[u8], mut cancelled: impl FnMut() -> Result<()>) -> Re
+         .and_then(|s| s.parse::<f64>().ok())
+         .context("video_duration_required")?;
+     ensure!(
+-        duration.is_finite() && duration > 0.0 && duration <= 3600.0,
++        duration.is_finite() && duration > 0.0 && duration.ceil() <= u32::MAX as f64,
+         "video_duration_limit"
+     );
+     Ok(duration.ceil() as u32)
+@@ -5810,6 +5844,74 @@ mod tests {
+         let decoded = audio_pcm(&silk, || Ok(())).unwrap();
+         assert_eq!(decoded.len(), 16000);
+     }
++
++    #[test]
++    fn original_preparation_keeps_jpeg_bytes_and_separate_small_previews() {
++        let mut noise = 1u32;
++        let pixels = image::RgbImage::from_fn(1280, 2096, |_, _| {
++            noise ^= noise << 13;
++            noise ^= noise >> 17;
++            noise ^= noise << 5;
++            let v = noise.to_le_bytes();
++            image::Rgb([v[0], v[1], v[2]])
++        });
++        let mut source = vec![];
++        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut source, 95)
++            .encode_image(&pixels)
++            .unwrap();
++        assert!(source.len() > 65520);
++        let (original, standard, thumbnail) =
++            image_variants(&source, None, None, ImageVariantSizing::PreserveOriginal).unwrap();
++        assert_eq!(source, original);
++        assert_eq!(digest(&source), digest(&original));
++        let size = wechat_protocol::media::inspect_image(&original).unwrap();
++        assert_eq!((size.width, size.height), (1280, 2096));
++        for (bytes, edge) in [(&standard, 640), (&thumbnail, 160)] {
++            assert!(bytes.len() <= 65520);
++            let size = wechat_protocol::media::inspect_image(bytes).unwrap();
++            assert!(size.width <= edge && size.height <= edge);
++        }
++        PreparedImageUpload::with_material(
++            &original,
++            &standard,
++            &thumbnail,
++            "image.jpg",
++            "filehelper",
++            &[1; 16],
++            "0123456789abcdef0123456789abcdef",
++        )
++        .unwrap();
++    }
++    #[test]
++    fn original_preparation_keeps_png_dimensions_without_the_small_copy_limit() {
++        let pixels = image::DynamicImage::new_rgb8(1280, 2096);
++        let mut source = std::io::Cursor::new(vec![]);
++        pixels
++            .write_to(&mut source, image::ImageFormat::Png)
++            .unwrap();
++        let (original, _, _) = image_variants(
++            source.get_ref(),
++            None,
++            None,
++            ImageVariantSizing::PreserveOriginal,
++        )
++        .unwrap();
++        let size = wechat_protocol::media::inspect_image(&original).unwrap();
++        assert_eq!((size.width, size.height), (1280, 2096));
++        assert_eq!(size.content_type, "image/jpeg");
++    }
++    #[test]
++    fn original_preparation_preserves_large_jpeg_with_reduced_decode_memory() {
++        let source = zstd::stream::decode_all(
++            include_bytes!("../tests/fixtures/send-images/50mp-baseline.jpg.zst").as_slice(),
++        )
++        .unwrap();
++        let (original, _, _) =
++            image_variants(&source, None, None, ImageVariantSizing::PreserveOriginal).unwrap();
++        assert_eq!(source, original);
++        let size = wechat_protocol::media::inspect_image(&original).unwrap();
++        assert_eq!((size.width, size.height), (6128, 8160));
++    }
+ }
+ 
+ #[path = "recall_send_author_media.rs"]
+diff --git a/packages/native-client-rust/crates/wechat-core/src/media_auto.rs b/packages/native-client-rust/crates/wechat-core/src/media_auto.rs
+index 307a14f53631d2fe7a32b10b4c6f6c191c6ef56c..6cd8f7a5977388622c5cb3f85c1f3443252b5b30 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/media_auto.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/media_auto.rs
+@@ -14,6 +14,11 @@ pub(super) fn advertised_length(plan: &DownloadPlan) -> Option<u64> {
+     }
+ }
+ pub(super) fn allowed(asset: &MediaAsset, limit: u64) -> bool {
++    // This adapter only sends videos. Never download received video bytes or
++    // thumbnails, including old pending work admitted after a daemon restart.
++    if asset.kind == MediaKind::Video {
++        return false;
++    }
+     if matches!(
+         asset.kind,
+         MediaKind::Image | MediaKind::Video | MediaKind::Sticker
+diff --git a/packages/native-client-rust/crates/wechat-core/src/media_concurrency_tests.rs b/packages/native-client-rust/crates/wechat-core/src/media_concurrency_tests.rs
+index 0b1e7c04b829e21fa300b21a64e4edc35bd43688..df3348fdce2c877380bb5ca14c0fad2d728c927a 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/media_concurrency_tests.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/media_concurrency_tests.rs
+@@ -57,7 +57,11 @@ impl MediaTransport for PausedCdn {
+     ) -> Result<UploadedMedia> {
+         bail!("unexpected upload")
+     }
+-    fn upload_image(&self, _: &PreparedImageUpload) -> Result<UploadedImage> {
++    fn upload_image(
++        &self,
++        _: &PreparedImageUpload,
++        _: crate::upstream::media::Progress<'_>,
++    ) -> Result<UploadedImage> {
+         bail!("unexpected upload")
+     }
+     fn upload_video(
+diff --git a/packages/native-client-rust/crates/wechat-core/src/media_types.rs b/packages/native-client-rust/crates/wechat-core/src/media_types.rs
+index 4fe2218a6e71f6dbfc327c6e5e4b1495658ab01f..10c9072f81c3e1818da8ebca3cc76364ff1b3ce0 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/media_types.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/media_types.rs
+@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+ use ts_rs::TS;
+ 
+-/// Largest source accepted by staging; send limits depend on the selected kind.
++/// Ordinary file policy, independent of video staging.
+ pub const MAX_SOURCE_BYTES: usize = wechat_media::MAX_FILE_BYTES;
++pub const MAX_UPLOAD_SOURCE_BYTES: usize = wechat_media::MAX_MEDIA_SOURCE_BYTES;
+ pub const MAX_ORDINARY_SOURCE_BYTES: usize = 25 * 1024 * 1024 - 17;
+ pub const MAX_VIDEO_SOURCE_BYTES: usize = wechat_media::MAX_VIDEO_SOURCE_BYTES;
+ #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+@@ -154,7 +155,8 @@ mod tests {
+     fn staging_limit_does_not_expand_other_send_kinds() {
+         assert_eq!(MAX_SOURCE_BYTES, 536_870_912);
+         assert_eq!(MediaKind::File.max_source_bytes(), MAX_SOURCE_BYTES);
+-        assert_eq!(MediaKind::Video.max_source_bytes(), 52_428_800);
++        assert_eq!(MediaKind::Video.max_source_bytes(), u32::MAX as usize - 16);
++        assert_eq!(MAX_UPLOAD_SOURCE_BYTES, MediaKind::Video.max_source_bytes());
+         for kind in [MediaKind::Image, MediaKind::Voice] {
+             assert_eq!(kind.max_source_bytes(), 26_214_383);
+             assert!(kind.max_source_bytes() < MAX_SOURCE_BYTES);
+diff --git a/packages/native-client-rust/crates/wechat-core/src/media_video.rs b/packages/native-client-rust/crates/wechat-core/src/media_video.rs
+index ff32e82c9bcc5e63fe7478ea00b34867901ff441..00382bcd25ae2760a03676f2c256d1d6284339fe 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/media_video.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/media_video.rs
+@@ -1,5 +1,5 @@
+-//! Normal video is an owned encoding policy, not a reconstruction of official
+-//! quality presets. Keep the entire video while fitting the legacy upload cap.
++//! Preserve compatible video sources. Codec conversion does not fit a size,
++//! resolution, frame-rate or bitrate budget.
+ use anyhow::{bail, ensure, Context, Result};
+ use std::{
+     fs::File,
+@@ -15,18 +15,16 @@ use std::{
+ };
+ use wechat_media::inspect_video_container;
+ 
+-const OUTPUT_LIMIT: usize = wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES;
++const OUTPUT_LIMIT: usize = wechat_media::MAX_VIDEO_SOURCE_BYTES;
+ const REPORT_LIMIT: usize = 65_536;
+ const STDERR_LIMIT: usize = 16_384;
+ const PREPARE_TIMEOUT: Duration = Duration::from_secs(300);
+ const POLL_INTERVAL: Duration = Duration::from_millis(50);
+ 
+-/// Produce one MP4 with H.264 Main/yuv420p, longest edge at most 720, at most 30
+-/// frames/second, and stereo 48kHz AAC when the source has audio. The bitrate
+-/// budget reserves 20% of the upload cap for muxing/encoder variation. Inputs
+-/// that cannot fit even 32kbps video plus 64kbps audio are refused. A file-size
+-/// stop is only a safety guard: independently decoded frame counts and video
+-/// durations must still match before any bytes are returned.
++/// Keep compatible H.264/AAC MP4 bytes unchanged regardless of source size,
++/// resolution or frame rate. Other movie-family sources use CRF encoding at
++/// their source dimensions/frame rate, with no file-size or bitrate target.
++/// Independent frame/duration checks prevent accidental truncation.
+ pub(super) fn prepare_normal(
+     input: &[u8],
+     seconds: u32,
+@@ -34,8 +32,8 @@ pub(super) fn prepare_normal(
+ ) -> Result<Vec<u8>> {
+     cancelled()?;
+     validate_input_length(input.len())?;
+-    inspect_video_container(input)?;
+-    ensure!((1..=3600).contains(&seconds), "video_duration_limit");
++    let content_type = inspect_video_container(input)?;
++    ensure!(seconds > 0, "video_duration_limit");
+     let deadline = Instant::now() + PREPARE_TIMEOUT;
+     let dir = wechat_platform::private_tempdir("wechat-video-")?;
+     let source = dir.path().join("source.mp4");
+@@ -62,7 +60,13 @@ pub(super) fn prepare_normal(
+         original.container_duration.ceil() as u32 == seconds,
+         "video_duration_changed"
+     );
+-    let video_bitrate = bitrate_budget(original.duration, original.audio)?;
++    if content_type == "video/mp4" && original.source_preservable {
++        cancelled()?;
++        return Ok(input.to_vec());
++    }
++    // Rounding odd dimensions is required by yuv420p. No playback envelope
++    // or frame-rate filter is applied to otherwise valid source streams.
++    let filter = "pad=ceil(iw/2)*2:ceil(ih/2)*2,setsar=1";
+     let mut command = Command::new("ffmpeg");
+     command.args([
+         "-v",
+@@ -98,32 +102,24 @@ pub(super) fn prepare_normal(
+         "-sn",
+         "-dn",
+         "-vf",
+-        "scale=w='min(720,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,fps=30",
++        filter,
+         "-c:v",
+         "libx264",
+         "-preset",
+         "fast",
+         "-profile:v",
+         "main",
+-        "-level:v",
+-        "3.1",
+         "-pix_fmt",
+         "yuv420p",
+         "-threads",
+         "2",
+-        "-b:v",
++        "-crf",
++        "18",
+     ]);
+     command
+-        .arg(video_bitrate.to_string())
+-        .args(["-maxrate", &video_bitrate.to_string(), "-bufsize"])
+-        .arg((video_bitrate * 2).to_string())
+-        .args([
+-            "-c:a", "aac", "-b:a", "64000", "-ac", "2", "-ar", "48000", "-t",
+-        ])
++        .args(["-c:a", "aac", "-q:a", "2", "-t"])
+         .arg(format!("{:.9}", original.duration))
+-        .args(["-movflags", "+faststart", "-fs"])
+-        .arg((OUTPUT_LIMIT + 1).to_string())
+-        .args(["-f", "mp4"])
++        .args(["-movflags", "+faststart", "-f", "mp4"])
+         .arg(&output);
+     execute(command, Some(&output), deadline, &mut cancelled)?;
+     let encoded = probe(&output, true, deadline, &mut cancelled)?;
+@@ -156,22 +152,32 @@ fn validate_input_length(length: usize) -> Result<()> {
+     Ok(())
+ }
+ 
+-fn bitrate_budget(duration: f64, audio: bool) -> Result<u64> {
+-    ensure!(
+-        duration.is_finite() && duration > 0.0 && duration <= 3600.0,
+-        "video_duration_limit"
+-    );
+-    let total = (OUTPUT_LIMIT as f64 * 8.0 * 0.8 / duration).floor() as u64;
+-    let video = total.saturating_sub(if audio { 64_000 } else { 0 });
+-    ensure!(video >= 32_000, "normal_video_size_limit");
+-    Ok(video.min(2_000_000))
+-}
+-
+ struct VideoProbe {
+     duration: f64,
+     container_duration: f64,
+     frame_rate: f64,
+     audio: bool,
++    source_preservable: bool,
++}
++
++fn unrotated(video: &serde_json::Value) -> bool {
++    let zero = |value: &serde_json::Value| {
++        value
++            .as_f64()
++            .or_else(|| value.as_str()?.parse::<f64>().ok())
++            == Some(0.0)
++    };
++    video
++        .get("tags")
++        .and_then(|v| v.get("rotate"))
++        .is_none_or(zero)
++        && video.get("side_data_list").is_none_or(|value| {
++            value.as_array().is_some_and(|items| {
++                items
++                    .iter()
++                    .all(|item| item.get("rotation").is_none_or(zero))
++            })
++        })
+ }
+ 
+ fn parse_probe(bytes: &[u8], normal: bool) -> Result<VideoProbe> {
+@@ -196,7 +202,7 @@ fn parse_probe_inner(bytes: &[u8], normal: bool, require_frames: bool) -> Result
+     let width = video["width"].as_u64().context("media_probe_failed")?;
+     let height = video["height"].as_u64().context("media_probe_failed")?;
+     ensure!(
+-        (2..=8192).contains(&width) && (2..=8192).contains(&height) && width * height <= 16_777_216,
++        (1..=u32::MAX as u64).contains(&width) && (1..=u32::MAX as u64).contains(&height),
+         "video_dimension_limit"
+     );
+     let number = |value: &serde_json::Value| -> Result<f64> {
+@@ -213,7 +219,7 @@ fn parse_probe_inner(bytes: &[u8], normal: bool, require_frames: bool) -> Result
+         None => container_duration,
+     };
+     ensure!(
+-        duration <= 3600.0 && container_duration <= 3600.05,
++        duration.ceil() <= u32::MAX as f64 && container_duration.ceil() <= u32::MAX as f64,
+         "video_duration_limit"
+     );
+     let (numerator, denominator) = video["avg_frame_rate"]
+@@ -223,7 +229,7 @@ fn parse_probe_inner(bytes: &[u8], normal: bool, require_frames: bool) -> Result
+     let frame_rate = numerator.parse::<f64>().context("media_probe_failed")?
+         / denominator.parse::<f64>().context("media_probe_failed")?;
+     ensure!(
+-        frame_rate.is_finite() && frame_rate > 0.0 && frame_rate <= 1000.0,
++        frame_rate.is_finite() && frame_rate > 0.0,
+         "video_frame_rate_limit"
+     );
+     if require_frames {
+@@ -231,7 +237,7 @@ fn parse_probe_inner(bytes: &[u8], normal: bool, require_frames: bool) -> Result
+             .as_str()
+             .and_then(|s| s.parse::<u64>().ok())
+             .context("media_probe_failed")?;
+-        ensure!(frames > 0 && frames <= 3_600_000, "video_frame_count_limit");
++        ensure!(frames > 0, "video_frame_count_limit");
+         // Reading/decoding every frame prevents a muxer's unchanged duration
+         // from disguising early termination at the file-size guard.
+         ensure!(
+@@ -239,31 +245,34 @@ fn parse_probe_inner(bytes: &[u8], normal: bool, require_frames: bool) -> Result
+             "video_encoder_incomplete"
+         );
+     }
++    let playback_format = video["codec_name"] == "h264"
++        && video["pix_fmt"] == "yuv420p"
++        && width.is_multiple_of(2)
++        && height.is_multiple_of(2)
++        && audios.iter().all(|audio| {
++            audio["codec_name"] == "aac"
++                && matches!(audio["sample_rate"].as_str(), Some("44100" | "48000"))
++                && matches!(audio["channels"].as_u64(), Some(1 | 2))
++        });
+     if normal {
+-        ensure!(
+-            video["codec_name"] == "h264"
+-                && video["pix_fmt"] == "yuv420p"
+-                && width <= 720
+-                && height <= 720
+-                && width.is_multiple_of(2)
+-                && height.is_multiple_of(2)
+-                && frame_rate <= 30.01,
+-            "normal_video_format"
+-        );
+-        if let Some(audio) = audios.first() {
+-            ensure!(
+-                audio["codec_name"] == "aac"
+-                    && audio["sample_rate"] == "48000"
+-                    && audio["channels"] == 2,
+-                "normal_video_format"
+-            );
+-        }
++        ensure!(playback_format, "normal_video_format");
+     }
++    let source_preservable = playback_format
++        && streams.len() == videos.len() + audios.len()
++        && matches!(
++            video["profile"].as_str(),
++            Some("Baseline" | "Constrained Baseline" | "Main" | "High")
++        )
++        && video["level"].as_u64().is_some_and(|v| v > 0)
++        && video["sample_aspect_ratio"] == "1:1"
++        && unrotated(video)
++        && audios.iter().all(|audio| audio["profile"] == "LC");
+     Ok(VideoProbe {
+         duration,
+         container_duration,
+         frame_rate,
+         audio: !audios.is_empty(),
++        source_preservable,
+     })
+ }
+ 
+@@ -293,7 +302,7 @@ fn probe(
+             "-threads",
+             "1",
+             "-show_entries",
+-            "stream=codec_name,codec_type,pix_fmt,width,height,duration,avg_frame_rate,nb_read_frames,sample_rate,channels:format=duration",
++            "stream=codec_name,codec_type,profile,level,pix_fmt,width,height,duration,avg_frame_rate,nb_read_frames,sample_rate,channels,sample_aspect_ratio:stream_tags=rotate:stream_side_data=rotation:format=duration",
+             "-of",
+             "json",
+         ]);
+@@ -513,7 +522,11 @@ mod tests {
+                     source
+                 );
+                 assert_eq!(openssl::sha::sha256(&source), source_hash);
+-                assert_ne!(normal, source);
++                if expected_type == "video/mp4" {
++                    assert_eq!(normal, source);
++                } else {
++                    assert_ne!(normal, source);
++                }
+             }
+         }
+     }
+@@ -569,7 +582,6 @@ mod tests {
+             .contains("incomplete"));
+         for (key, invalid) in [
+             ("codec_name", json!("hevc")),
+-            ("width", json!(1280)),
+             ("avg_frame_rate", json!("0/0")),
+         ] {
+             let mut value = report();
+@@ -579,14 +591,10 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn normal_video_sizes_and_bitrate_have_explicit_limits() {
++    fn video_sizes_only_have_the_descriptor_representation_boundary() {
+         assert!(validate_input_length(wechat_media::MAX_VIDEO_SOURCE_BYTES).is_ok());
+         assert!(validate_input_length(wechat_media::MAX_VIDEO_SOURCE_BYTES + 1).is_err());
+         assert!(validate_input_length(0).is_err());
+-        assert_eq!(bitrate_budget(6.0, true).unwrap(), 2_000_000);
+-        assert!(bitrate_budget(1200.0, true).unwrap() < 100_000);
+-        assert!(bitrate_budget(3600.0, true).is_err());
+-        assert!(bitrate_budget(f64::NAN, false).is_err());
+         assert!(read_pipe(&[1u8; 8][..], 7, Arc::new(AtomicBool::new(false))).is_err());
+     }
+ 
+@@ -659,7 +667,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn normal_video_encodes_full_video_and_audio_under_cap() {
++    fn normal_video_retains_full_video_and_audio() {
+         let dir = wechat_platform::private_tempdir("wechat-video-test-").unwrap();
+         let source = dir.path().join("source.mp4");
+         let status = Command::new("ffmpeg")
+@@ -719,4 +727,174 @@ mod tests {
+             .unwrap();
+         assert!(status.success());
+     }
++
++    fn quality_fixture(size: &str, rate: u32, codec: &str, muxer: &str) -> Vec<u8> {
++        let dir = wechat_platform::private_tempdir("wechat-video-quality-test-").unwrap();
++        let path = dir.path().join("source.mov");
++        let mut command = Command::new("ffmpeg");
++        command
++            .args(["-v", "error", "-nostdin", "-f", "lavfi", "-i"])
++            .arg(format!("testsrc2=size={size}:rate={rate}:duration=1"))
++            .args([
++                "-f",
++                "lavfi",
++                "-i",
++                "sine=frequency=440:sample_rate=44100:duration=1",
++                "-c:v",
++                codec,
++                "-threads",
++                "2",
++            ]);
++        if codec == "libx264" {
++            command.args([
++                "-preset",
++                "ultrafast",
++                "-profile:v",
++                "high",
++                "-level:v",
++                "4.2",
++                "-pix_fmt",
++                "yuv420p",
++            ]);
++        }
++        command
++            .args(["-c:a", "aac", "-ac", "1", "-t", "1", "-f", muxer])
++            .arg(&path);
++        assert!(command.status().unwrap().success());
++        std::fs::read(path).unwrap()
++    }
++
++    #[test]
++    fn compatible_portrait_mp4_preserves_exact_video_audio_and_frame_bytes() {
++        let source = quality_fixture("1080x1920", 30, "libx264", "mp4");
++        let prepared = prepare_normal(&source, 1, || Ok(())).unwrap();
++        assert_eq!(prepared, source);
++        assert_eq!(
++            openssl::sha::sha256(&prepared),
++            openssl::sha::sha256(&source)
++        );
++    }
++
++    #[test]
++    fn compatible_sixty_fps_mp4_is_not_reencoded() {
++        let source = quality_fixture("640x360", 60, "libx264", "mp4");
++        let prepared = prepare_normal(&source, 1, || Ok(())).unwrap();
++        assert_eq!(prepared, source);
++    }
++
++    #[test]
++    fn compatible_mp4_above_fifty_mib_is_preserved_byte_for_byte() {
++        let mut source = quality_fixture("160x120", 5, "libx264", "mp4");
++        // A valid free box makes this a large, independently decodable MP4
++        // without an expensive long recording or a network dependency.
++        let padding = 51 * 1024 * 1024;
++        source.extend_from_slice(&((padding + 8) as u32).to_be_bytes());
++        source.extend_from_slice(b"free");
++        source.resize(source.len() + padding, 0);
++        assert!(source.len() > 50 * 1024 * 1024);
++        let prepared = prepare_normal(&source, 1, || Ok(())).unwrap();
++        assert_eq!(prepared, source);
++        assert_eq!(
++            openssl::sha::sha256(&prepared),
++            openssl::sha::sha256(&source)
++        );
++    }
++
++    #[test]
++    fn compatible_four_k_and_high_frame_rate_sources_are_preserved() {
++        for (size, rate) in [("3840x2160", 12), ("160x120", 120)] {
++            let source = quality_fixture(size, rate, "libx264", "mp4");
++            assert_eq!(prepare_normal(&source, 1, || Ok(())).unwrap(), source);
++        }
++        let mut value = report();
++        value["streams"][0]["duration"] = json!("7200.000000");
++        value["streams"][0]["nb_read_frames"] = json!("216000");
++        value["format"]["duration"] = json!("7200.000000");
++        assert!(parse_probe(&serde_json::to_vec(&value).unwrap(), true).is_ok());
++    }
++
++    #[test]
++    fn incompatible_portrait_movie_keeps_full_hd_dimensions_when_transcoded() {
++        let source = quality_fixture("1080x1920", 24, "mjpeg", "mov");
++        let prepared = prepare_normal(&source, 1, || Ok(())).unwrap();
++        assert_ne!(prepared, source);
++        let dir = wechat_platform::private_tempdir("wechat-video-hd-result-").unwrap();
++        let path = dir.path().join("result.mp4");
++        std::fs::write(&path, prepared).unwrap();
++        let report = Command::new("ffprobe")
++            .args([
++                "-v",
++                "error",
++                "-select_streams",
++                "v:0",
++                "-show_entries",
++                "stream=width,height,avg_frame_rate,codec_name",
++                "-of",
++                "json",
++            ])
++            .arg(&path)
++            .output()
++            .unwrap();
++        assert!(report.status.success());
++        let value: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
++        assert_eq!(value["streams"][0]["width"], 1080);
++        assert_eq!(value["streams"][0]["height"], 1920);
++        assert_eq!(value["streams"][0]["avg_frame_rate"], "24/1");
++        assert_eq!(value["streams"][0]["codec_name"], "h264");
++    }
++
++    #[test]
++    fn incompatible_four_k_source_keeps_source_dimensions() {
++        let source = quality_fixture("3840x2160", 12, "mpeg4", "mp4");
++        let prepared = prepare_normal(&source, 1, || Ok(())).unwrap();
++        assert!(prepared.len() <= OUTPUT_LIMIT);
++        let dir = wechat_platform::private_tempdir("wechat-video-4k-result-").unwrap();
++        let path = dir.path().join("result.mp4");
++        std::fs::write(&path, prepared).unwrap();
++        let report = Command::new("ffprobe")
++            .args([
++                "-v",
++                "error",
++                "-select_streams",
++                "v:0",
++                "-show_entries",
++                "stream=width,height",
++                "-of",
++                "json",
++            ])
++            .arg(&path)
++            .output()
++            .unwrap();
++        assert!(report.status.success());
++        let value: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
++        assert_eq!(value["streams"][0]["width"], 3840);
++        assert_eq!(value["streams"][0]["height"], 2160);
++    }
++
++    #[test]
++    fn compatible_passthrough_requires_square_pixels_and_no_rotation() {
++        let mut value = report();
++        value["streams"][0]["profile"] = json!("High");
++        value["streams"][0]["level"] = json!(41);
++        value["streams"][0]["sample_aspect_ratio"] = json!("1:1");
++        assert!(
++            parse_probe(&serde_json::to_vec(&value).unwrap(), true)
++                .unwrap()
++                .source_preservable
++        );
++        for (key, invalid) in [
++            ("sample_aspect_ratio", json!("2:1")),
++            ("profile", json!("High 10")),
++            ("tags", json!({"rotate":"90"})),
++            ("side_data_list", json!([{"rotation":-90}])),
++        ] {
++            let mut changed = value.clone();
++            changed["streams"][0][key] = invalid;
++            assert!(
++                !parse_probe(&serde_json::to_vec(&changed).unwrap(), true)
++                    .unwrap()
++                    .source_preservable
++            );
++        }
++    }
+ }
+diff --git a/packages/native-client-rust/crates/wechat-core/src/sync_projection.rs b/packages/native-client-rust/crates/wechat-core/src/sync_projection.rs
+index a502b9b3f59c8295249ca64320f3b903c23d18cd..786d1e45655adae18d08cfe03a492c36a63f9947 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/sync_projection.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/sync_projection.rs
+@@ -2720,7 +2720,7 @@ mod automatic_voice_tests {
+         )
+     }
+     #[test]
+-    fn received_media_uses_each_advertised_variant_size_and_keeps_thumbnails_automatic() {
++    fn received_media_applies_size_policy_but_never_downloads_video_or_its_thumbnail() {
+         let (_temporary, store, core) = fixture();
+         store
+             .set_account_settings(
+@@ -2732,12 +2732,12 @@ mod automatic_voice_tests {
+             .unwrap();
+         for (server, kind, content, expected) in [
+             (300, 3, "<msg><img aeskey='09090909090909090909090909090909' cdnmidimgurl='synthetic-standard' length='100' cdnbigimgurl='synthetic-original' hdlength='101' cdnthumburl='synthetic-thumb' cdnthumbaeskey='09090909090909090909090909090909'/></msg>", vec!["standard", "thumbnail"]),
+-            (301, 43, "<msg><videomsg aeskey='09090909090909090909090909090909' cdnvideourl='synthetic-video' length='100' cdnrawvideourl='synthetic-original-video' cdnrawvideoaeskey='09090909090909090909090909090909' rawlength='101' cdnthumburl='synthetic-video-thumb' cdnthumbaeskey='09090909090909090909090909090909'/></msg>", vec!["normal", "thumbnail"]),
++            (301, 43, "<msg><videomsg aeskey='09090909090909090909090909090909' cdnvideourl='synthetic-video' length='100' cdnrawvideourl='synthetic-original-video' cdnrawvideoaeskey='09090909090909090909090909090909' rawlength='101' cdnthumburl='synthetic-video-thumb' cdnthumbaeskey='09090909090909090909090909090909'/></msg>", vec![]),
+             (302, 49, "<msg><appmsg><title>small.txt</title><type>6</type><appattach><totallen>80</totallen><cdnattachurl>synthetic-file</cdnattachurl><aeskey>09090909090909090909090909090909</aeskey></appattach></appmsg></msg>", vec!["original"]),
+             (303, 3, "<msg><img aeskey='09090909090909090909090909090909' cdnmidimgurl='unknown-standard' cdnbigimgurl='unknown-original' cdnthumburl='unknown-thumb' cdnthumbaeskey='09090909090909090909090909090909'/></msg>", vec!["thumbnail"]),
+             (304, 49, "<msg><appmsg><title>unknown.txt</title><type>6</type><appattach><cdnattachurl>unknown-file</cdnattachurl><aeskey>09090909090909090909090909090909</aeskey></appattach></appmsg></msg>", vec![]),
+             (305, 3, "<msg><img aeskey='09090909090909090909090909090909' cdnbigimgurl='small-original' hdlength='100'/></msg>", vec!["original"]),
+-            (306, 43, "<msg><videomsg cdnrawvideourl='small-original-video' cdnrawvideoaeskey='09090909090909090909090909090909' rawlength='100'/></msg>", vec!["original"]),
++            (306, 43, "<msg><videomsg cdnrawvideourl='small-original-video' cdnrawvideoaeskey='09090909090909090909090909090909' rawlength='100'/></msg>", vec![]),
+         ] {
+             core.apply_received_sync_command("one", &add(kind, "peer", "synthetic_self", content.as_bytes(), server, 100), &format!("media-{server}"), "live").unwrap();
+             let mut qualities = store.runtime_prefix("one", "received-media:", 100).unwrap().iter().filter_map(|(_, bytes)| {
+@@ -2788,6 +2788,63 @@ mod automatic_voice_tests {
+             .is_empty());
+         assert!(store.queued_media_jobs("one").unwrap().is_empty());
+     }
++
++    #[tokio::test]
++    async fn old_video_receive_work_is_discarded_without_starting_a_download() {
++        let (_temporary, store, core) = fixture();
++        core.apply_received_sync_command("one", &add(43, "peer", "synthetic_self", b"<msg><videomsg aeskey='09090909090909090909090909090909' cdnvideourl='synthetic-video' length='100'/></msg>", 301, 100), "video-upgrade", "live").unwrap();
++        let event = store
++            .events("one", 0, 100)
++            .unwrap()
++            .into_iter()
++            .find(|event| event.kind == "message.committed")
++            .unwrap();
++        let message = event.data["messageId"].as_str().unwrap();
++        let asset = core
++            .media_assets("one", message)
++            .unwrap()
++            .into_iter()
++            .find(|asset| asset.variant == crate::MediaVariant::Normal)
++            .unwrap();
++        let pending = json!({"request":{"messageId":message,"assetId":asset.id,"quality":"normal"},"attempts":0});
++        store
++            .put_runtime(
++                "one",
++                &format!("received-media:{}", asset.id),
++                &serde_json::to_vec(&pending).unwrap(),
++            )
++            .unwrap();
++        store.put_runtime("one", "desired", b"connected").unwrap();
++        store
++            .put_runtime(
++                "one",
++                "validated-generation",
++                core.ownership_generation.as_bytes(),
++            )
++            .unwrap();
++        assert_eq!(core.admit_received_media("one").unwrap(), 0);
++        assert!(store
++            .runtime_prefix("one", "received-media:", 100)
++            .unwrap()
++            .is_empty());
++        store
++            .create_media_job(
++                "one",
++                "old-video-job",
++                "download:old-video",
++                &"a".repeat(64),
++                "download",
++                &json!({"assetId":asset.id}),
++                b"retained old plan",
++            )
++            .unwrap();
++        assert_eq!(core.resume_media_jobs().unwrap(), 0);
++        assert_eq!(
++            store.media_job("one", "old-video-job").unwrap().state,
++            "cancelled"
++        );
++        assert!(store.queued_media_jobs("one").unwrap().is_empty());
++    }
+     #[test]
+     fn received_voice_queues_one_bound_playback_download_without_a_client() {
+         let (_temporary, store, core) = fixture();
+diff --git a/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs b/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs
+index f8a182fe9829451b18057d4c5c20942ca02b8256..cb02b8d6c06cdce37eafe5df2a9cf5b588a0cd6e 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs
+@@ -17,7 +17,11 @@ pub trait MediaTransport {
+         progress: Progress<'_>,
+     ) -> Result<DownloadedMedia>;
+     fn upload(&self, prepared: &PreparedUpload, progress: Progress<'_>) -> Result<UploadedMedia>;
+-    fn upload_image(&self, prepared: &PreparedImageUpload) -> Result<UploadedImage>;
++    fn upload_image(
++        &self,
++        prepared: &PreparedImageUpload,
++        progress: Progress<'_>,
++    ) -> Result<UploadedImage>;
+     fn upload_video(
+         &self,
+         prepared: &PreparedVideoUpload,
+@@ -47,8 +51,12 @@ impl MediaTransport for CdnClient {
+     fn upload(&self, prepared: &PreparedUpload, progress: Progress<'_>) -> Result<UploadedMedia> {
+         self.upload_with_progress(prepared, progress)
+     }
+-    fn upload_image(&self, prepared: &PreparedImageUpload) -> Result<UploadedImage> {
+-        self.upload_image(prepared)
++    fn upload_image(
++        &self,
++        prepared: &PreparedImageUpload,
++        progress: Progress<'_>,
++    ) -> Result<UploadedImage> {
++        self.upload_image_with_progress(prepared, progress)
+     }
+     fn upload_video(
+         &self,
+diff --git a/packages/native-client-rust/crates/wechat-media/Cargo.toml b/packages/native-client-rust/crates/wechat-media/Cargo.toml
+index 13dd9bd812869e61f5d261c4203a46d406aa7525..9549125bbb05a016f67a53911e2aae6f539ba109 100644
+--- a/packages/native-client-rust/crates/wechat-media/Cargo.toml
++++ b/packages/native-client-rust/crates/wechat-media/Cargo.toml
+@@ -21,5 +21,7 @@ tempfile.workspace = true
+ libc.workspace = true
+ image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+ 
++jpeg-decoder = { version = "0.3.2", default-features = false }
++
+ [dev-dependencies]
+ md-5 = "0.10"
+diff --git a/packages/native-client-rust/crates/wechat-media/src/image.rs b/packages/native-client-rust/crates/wechat-media/src/image.rs
+index 95b47a5b7089e6e2b3b690dc2e07d041d98aac5d..ba7156ca35b520aa5c5f1987ee8dbbccab9c4948 100644
+--- a/packages/native-client-rust/crates/wechat-media/src/image.rs
++++ b/packages/native-client-rust/crates/wechat-media/src/image.rs
+@@ -144,13 +144,63 @@ fn png_has_end_chunk(bytes: &[u8]) -> bool {
+     false
+ }
+ 
++fn inspect_large_jpeg(bytes: &[u8]) -> Result<ImageInspection> {
++    use jpeg_decoder::PixelFormat;
++    ensure!(jpeg_has_end_marker(bytes), "jpeg_trailer_missing");
++    let failure = |_| anyhow::anyhow!("image_decode_failed");
++    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(bytes));
++    decoder.set_max_decoding_buffer_size(128 * 1024 * 1024);
++    decoder.read_info().map_err(failure)?;
++    let info = decoder
++        .info()
++        .ok_or_else(|| anyhow::anyhow!("image_decode_failed"))?;
++    let (width, height) = (u32::from(info.width), u32::from(info.height));
++    ensure!(
++        width > 0
++            && height > 0
++            && width <= 8192
++            && height <= 8192
++            && u64::from(width) * u64::from(height) <= 64_000_000,
++        "image_decode_limit"
++    );
++    let channels = match info.pixel_format {
++        PixelFormat::L8 => 1,
++        PixelFormat::RGB24 => 3,
++        _ => anyhow::bail!("image_format_unsupported"),
++    };
++    let (scaled_width, scaled_height) = decoder.scale(1280, 1280).map_err(failure)?;
++    let decoded = decoder.decode().map_err(failure)?;
++    ensure!(
++        decoded.len() == usize::from(scaled_width) * usize::from(scaled_height) * channels,
++        "image_decode_failed"
++    );
++    Ok(ImageInspection {
++        content_type: "image/jpeg".into(),
++        width,
++        height,
++        frames: 1,
++        animation_preserved: false,
++    })
++}
++
+ pub(crate) fn inspect_standard_image(bytes: &[u8]) -> Result<ImageInspection> {
+     ensure!(
+-        !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024,
++        !bytes.is_empty() && bytes.len() <= 25 * 1024 * 1024 - 17,
+         "image_size_limit"
+     );
+     let format =
+         image::guess_format(bytes).map_err(|_| anyhow::anyhow!("image_format_unsupported"))?;
++    ensure!(
++        format == image::ImageFormat::Jpeg || bytes.len() <= 16 * 1024 * 1024,
++        "image_size_limit"
++    );
++    if format == image::ImageFormat::Jpeg {
++        let (width, height) =
++            image::ImageReader::with_format(Cursor::new(bytes), format).into_dimensions()?;
++        if width > 4096 || height > 4096 || u64::from(width) * u64::from(height) > 16_777_216 {
++            return inspect_large_jpeg(bytes);
++        }
++    }
+     let limits = || {
+         let mut l = image::Limits::default();
+         l.max_image_width = Some(4096);
+@@ -434,4 +484,16 @@ mod tests {
+         complete.push(0xd9);
+         assert!(jpeg_has_end_marker(&complete));
+     }
++
++    #[test]
++    fn long_jpeg_original_is_inspected_without_losing_dimensions() {
++        let pixels = image::RgbImage::from_pixel(80, 6000, image::Rgb([20, 60, 90]));
++        let mut bytes = vec![];
++        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95)
++            .encode_image(&pixels)
++            .unwrap();
++        let result = inspect_standard_image(&bytes).unwrap();
++        assert_eq!((result.width, result.height), (80, 6000));
++        assert!(inspect_standard_image(&bytes[..bytes.len() / 2]).is_err());
++    }
+ }
+diff --git a/packages/native-client-rust/crates/wechat-media/src/lib.rs b/packages/native-client-rust/crates/wechat-media/src/lib.rs
+index fc1caf116faec5e32f3fdfe18b97f81032bf4912..046e6715df412fa4000ce77d252cae82c9ba0c91 100644
+--- a/packages/native-client-rust/crates/wechat-media/src/lib.rs
++++ b/packages/native-client-rust/crates/wechat-media/src/lib.rs
+@@ -14,8 +14,12 @@ pub use wxgf::wxgf_preview;
+ pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+ /// Native ordinary-file plaintext limit, shared by transport and local storage.
+ pub const MAX_FILE_BYTES: usize = 512 * 1024 * 1024;
+-/// Initial source/original-video limit; normal playback is prepared separately.
+-pub const MAX_VIDEO_SOURCE_BYTES: usize = 50 * 1024 * 1024;
++/// Existing CDN descriptors use u32 lengths, including AES padding. This is a
++/// representation boundary, not an application-level video size policy.
++pub const MAX_VIDEO_SOURCE_BYTES: usize = u32::MAX as usize - 16;
++/// Owned media staging must also admit video sources; file sends keep their
++/// independent MAX_FILE_BYTES policy.
++pub const MAX_MEDIA_SOURCE_BYTES: usize = MAX_VIDEO_SOURCE_BYTES;
+ 
+ #[derive(Debug)]
+ pub struct DecodedImage {
+diff --git a/packages/native-client-rust/crates/wechat-profile/src/media.rs b/packages/native-client-rust/crates/wechat-profile/src/media.rs
+index 197f2acbc2e4a6264e2cc89fee5dc1ea3e5d28ac..50d6a61561e8208e772e7b8b65331b59dddba331 100644
+--- a/packages/native-client-rust/crates/wechat-profile/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-profile/src/media.rs
+@@ -19,15 +19,17 @@ use std::{
+ pub const MAX_CACHED_MEDIA_BYTES: usize = 128 * 1024 * 1024;
+ pub const MAX_CACHED_FILE_BYTES: usize = wechat_media::MAX_FILE_BYTES;
+ fn hardlink_limit(kind: HardlinkKind) -> usize {
+-    if kind == HardlinkKind::File {
+-        MAX_CACHED_FILE_BYTES
+-    } else {
+-        MAX_CACHED_MEDIA_BYTES
++    match kind {
++        HardlinkKind::File => MAX_CACHED_FILE_BYTES,
++        HardlinkKind::Video => wechat_media::MAX_VIDEO_SOURCE_BYTES,
++        _ => MAX_CACHED_MEDIA_BYTES,
+     }
+ }
+ fn cache_path_limit(relative: &str) -> usize {
+     if relative.starts_with("msg/file/") {
+         MAX_CACHED_FILE_BYTES
++    } else if relative.starts_with("msg/video/") {
++        wechat_media::MAX_VIDEO_SOURCE_BYTES
+     } else {
+         MAX_CACHED_MEDIA_BYTES
+     }
+@@ -1720,7 +1722,11 @@ pub fn cache_video_projection(
+         attrs.get(size).ok_or(ProfileError::InvalidMetadata)?,
+         attrs.get(digest).map(String::as_str),
+         quality != VideoQuality::Thumbnail,
+-        MAX_CACHED_MEDIA_BYTES,
++        if quality == VideoQuality::Thumbnail {
++            MAX_CACHED_MEDIA_BYTES
++        } else {
++            wechat_media::MAX_VIDEO_SOURCE_BYTES
++        },
+     )?;
+     if quality == VideoQuality::Thumbnail {
+         if crate::images::validate_image(plaintext)?.0 != "image/jpeg" {
+@@ -1882,13 +1888,19 @@ pub fn cache_hardlink_media_projection(
+ mod cache_limit_tests {
+     use super::*;
+     #[test]
+-    fn only_ordinary_file_namespaces_receive_the_larger_limit() {
++    fn video_namespaces_use_the_descriptor_boundary_without_expanding_images() {
+         assert_eq!(hardlink_limit(HardlinkKind::File), 536_870_912);
+         assert_eq!(cache_path_limit("msg/file/2026-10/a.bin"), 536_870_912);
+-        for kind in [HardlinkKind::Video, HardlinkKind::Image] {
+-            assert_eq!(hardlink_limit(kind), MAX_CACHED_MEDIA_BYTES);
+-        }
+-        for path in ["msg/video/a", "msg/attach/a", "msg/file2/a"] {
++        assert_eq!(
++            hardlink_limit(HardlinkKind::Video),
++            wechat_media::MAX_VIDEO_SOURCE_BYTES
++        );
++        assert_eq!(
++            cache_path_limit("msg/video/a"),
++            wechat_media::MAX_VIDEO_SOURCE_BYTES
++        );
++        assert_eq!(hardlink_limit(HardlinkKind::Image), MAX_CACHED_MEDIA_BYTES);
++        for path in ["msg/attach/a", "msg/file2/a"] {
+             assert_eq!(cache_path_limit(path), MAX_CACHED_MEDIA_BYTES);
+         }
+     }
+diff --git a/packages/native-client-rust/crates/wechat-protocol/src/media.rs b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
+index 500ea8ce4a6914a46025a70f2e21a760cfe83e9c..3cb44da6a747685064ce56309d21ffea8c656235 100644
+--- a/packages/native-client-rust/crates/wechat-protocol/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
+@@ -1138,6 +1138,15 @@ pub struct UploadedVideo {
+     #[serde(default)]
+     pub original: Option<UploadedMedia>,
+ }
++fn original_jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
++    ensure!(
++        !bytes.is_empty() && bytes.len() <= MAX_NATIVE_UPLOAD_BYTES,
++        "Original JPEG outside source limit"
++    );
++    let image = inspect_image(bytes)?;
++    ensure!(image.content_type == "image/jpeg", "Expected JPEG original");
++    Ok((image.width, image.height))
++}
+ fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+     use image::GenericImageView;
+     ensure!(
+@@ -1213,7 +1222,7 @@ impl PreparedImageUpload {
+         key: &[u8],
+         file_key: &str,
+     ) -> Result<Self> {
+-        let (width, height) = jpeg_dimensions(original)?;
++        let (width, height) = original_jpeg_dimensions(original)?;
+         let original = PreparedUpload::with_material(
+             original,
+             MediaQuality::Original,
+@@ -1243,7 +1252,7 @@ impl PreparedImageUpload {
+         file_name: &str,
+         destination: &str,
+     ) -> Result<Self> {
+-        let (width, height) = jpeg_dimensions(original)?;
++        let (width, height) = original_jpeg_dimensions(original)?;
+         let original =
+             PreparedUpload::prepare(original, MediaQuality::Original, file_name, destination)?;
+         let standard = PreparedVariant::new(standard, &original.aes_key)?;
+@@ -1262,13 +1271,13 @@ impl PreparedImageUpload {
+         self.original.validate()?;
+         let raw = decrypt_cdn(&self.original.encrypted, &self.original.aes_key)?;
+         ensure!(
+-            jpeg_dimensions(&raw)? == (self.width, self.height),
++            original_jpeg_dimensions(&raw)? == (self.width, self.height),
+             "Prepared original dimensions differ"
+         );
+         self.standard.validate(&self.original.aes_key)?;
+         self.thumbnail.validate(&self.original.aes_key)?;
+         ensure!(
+-            self.original.plaintext_bytes <= 65520
++            self.original.plaintext_bytes as usize <= MAX_NATIVE_UPLOAD_BYTES
+                 && self.standard.width <= self.width
+                 && self.standard.height <= self.height
+                 && self.thumbnail.width <= self.standard.width
+@@ -1290,7 +1299,9 @@ impl PreparedVideoUpload {
+         file_key: &str,
+     ) -> Result<Self> {
+         ensure!(
+-            video.len() >= 12 && video.len() <= MAX_NATIVE_UPLOAD_BYTES && video[4..8] == *b"ftyp",
++            video.len() >= 12
++                && video.len() <= wechat_media::MAX_VIDEO_SOURCE_BYTES
++                && video[4..8] == *b"ftyp",
+             "Expected bounded MP4 container"
+         );
+         let video = PreparedUpload::with_material(
+@@ -1315,7 +1326,9 @@ impl PreparedVideoUpload {
+         destination: &str,
+     ) -> Result<Self> {
+         ensure!(
+-            video.len() >= 12 && video.len() <= MAX_NATIVE_UPLOAD_BYTES && video[4..8] == *b"ftyp",
++            video.len() >= 12
++                && video.len() <= wechat_media::MAX_VIDEO_SOURCE_BYTES
++                && video[4..8] == *b"ftyp",
+             "Expected bounded MP4 container"
+         );
+         let video = PreparedUpload::prepare(video, MediaQuality::Video, file_name, destination)?;
+@@ -1391,27 +1404,52 @@ fn uploaded_variant(
+ }
+ impl CdnClient {
+     pub fn upload_image(&self, p: &PreparedImageUpload) -> Result<UploadedImage> {
++        self.upload_image_with_progress(p, |_, _| Ok(()))
++    }
++    pub fn upload_image_with_progress(
++        &self,
++        p: &PreparedImageUpload,
++        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
++    ) -> Result<UploadedImage> {
++        self.upload_image_with_transport(p, progress, |path, fields| self.post(path, fields))
++    }
++    fn upload_image_with_transport(
++        &self,
++        p: &PreparedImageUpload,
++        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
++        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
++    ) -> Result<UploadedImage> {
+         p.validate()?;
+-        let end = p.original.encrypted.len() - 1;
+-        let mut f = upload_fields(&self.config, &p.original, 1, 0, end)?;
+-        f.insert("filedata".into(), p.original.encrypted.clone());
+-        add_thumbnail(&mut f, &p.thumbnail);
+-        for (k, v) in [
+-            ("imgheight", p.height as u64),
+-            ("imgwidth", p.width as u64),
+-            ("midimgrawsize", p.standard.plaintext_bytes as u64),
+-            ("midimgtotalsize", p.standard.encrypted.len() as u64),
+-            ("midimgchecksum", p.standard.encrypted_checksum as u64),
+-            ("file_format", 0),
+-            ("mid_format", 0),
+-        ] {
+-            put(&mut f, k, v);
+-        }
+-        f.insert("midimgmd5".into(), p.standard.md5.as_bytes().to_vec());
+-        f.insert("midimgdata".into(), p.standard.encrypted.clone());
+-        let reply = self.post("/uploadv3", &f)?;
+         let mut file_id = None;
+-        validate_upload_reply(&reply, 1, 0, end, &mut file_id)?;
++        for (sequence, chunk) in p.original.encrypted.chunks(UPLOAD_CHUNK).enumerate() {
++            let start = sequence * UPLOAD_CHUNK;
++            let end = start + chunk.len() - 1;
++            progress(start as u64, Some(p.original.encrypted.len() as u64))?;
++            let mut fields =
++                upload_fields(&self.config, &p.original, sequence as u32 + 1, start, end)?;
++            fields.insert("filedata".into(), chunk.to_vec());
++            if start == 0 {
++                add_thumbnail(&mut fields, &p.thumbnail);
++                for (key, value) in [
++                    ("imgheight", p.height as u64),
++                    ("imgwidth", p.width as u64),
++                    ("midimgrawsize", p.standard.plaintext_bytes as u64),
++                    ("midimgtotalsize", p.standard.encrypted.len() as u64),
++                    ("midimgchecksum", p.standard.encrypted_checksum as u64),
++                    ("file_format", 0),
++                    ("mid_format", 0),
++                ] {
++                    put(&mut fields, key, value);
++                }
++                fields.insert("midimgmd5".into(), p.standard.md5.as_bytes().to_vec());
++                fields.insert("midimgdata".into(), p.standard.encrypted.clone());
++            }
++            let reply = post("/uploadv3", &fields)?;
++            validate_upload_reply(&reply, sequence as u32 + 1, start, end, &mut file_id)?;
++            if end + 1 < p.original.encrypted.len() {
++                progress((end + 1) as u64, Some(p.original.encrypted.len() as u64))?;
++            }
++        }
+         let id =
+             file_id.ok_or_else(|| anyhow::anyhow!("Image upload returned no file identifier"))?;
+         Ok(UploadedImage {
+@@ -1438,8 +1476,7 @@ impl CdnClient {
+     ) -> Result<UploadedVideo> {
+         p.video.validate()?;
+         ensure!(
+-            p.video.kind == MediaQuality::Video
+-                && p.video.plaintext_bytes as usize <= MAX_NATIVE_UPLOAD_BYTES,
++            p.video.kind == MediaQuality::Video,
+             "Invalid normal video upload profile"
+         );
+         p.thumbnail.validate(&p.video.aes_key)?;
+@@ -2228,7 +2265,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn paired_video_preserves_final_receipt_and_does_not_admit_large_normal() {
++    fn paired_video_preserves_final_receipt_and_rejects_corrupted_material() {
+         let mut thumbnail = Vec::new();
+         image::codecs::jpeg::JpegEncoder::new(&mut thumbnail)
+             .encode_image(&image::DynamicImage::new_rgb8(16, 12))
+@@ -2274,10 +2311,61 @@ mod tests {
+             .upload_video_with_transport(
+                 &altered,
+                 |_, _| Ok(()),
+-                |_, _| { panic!("Large normal video reached legacy transport") }
++                |_, _| { panic!("Corrupted video reached transport") }
+             )
+             .is_err());
+     }
++
++    #[test]
++    fn normal_video_above_fifty_mib_uses_correlated_chunks_with_unchanged_bytes() {
++        let mut video = b"\0\0\0\x0cftypisom".to_vec();
++        video.resize(51 * 1024 * 1024, 0x37);
++        let mut thumbnail = Vec::new();
++        image::codecs::jpeg::JpegEncoder::new(&mut thumbnail)
++            .encode_image(&image::DynamicImage::new_rgb8(16, 12))
++            .unwrap();
++        let prepared = PreparedVideoUpload::with_material(
++            &video,
++            &thumbnail,
++            "large.mp4",
++            "filehelper",
++            &[0x31; 16],
++            "00112233445566778899aabbccddeeff",
++        )
++        .unwrap();
++        let mut offset = 0;
++        let result = client()
++            .upload_video_with_transport(
++                &prepared,
++                |_, _| Ok(()),
++                |path, fields| {
++                    assert_eq!(path, "/uploadv3");
++                    assert_eq!(integer(fields, "filetype")?, 4);
++                    assert_eq!(integer(fields, "rangestart")? as usize, offset);
++                    let chunk = &fields["filedata"];
++                    assert_eq!(
++                        chunk,
++                        &prepared.video.encrypted[offset..offset + chunk.len()]
++                    );
++                    assert_eq!(fields.contains_key("thumbdata"), offset == 0);
++                    offset += chunk.len();
++                    let mut reply = CdnFields::new();
++                    put(&mut reply, "retcode", 0);
++                    for key in ["seq", "rangestart", "rangeend"] {
++                        reply.insert(key.into(), fields[key].clone());
++                    }
++                    reply.insert("fileid".into(), b"synthetic-large-video".to_vec());
++                    Ok(reply)
++                },
++            )
++            .unwrap();
++        assert_eq!(offset, prepared.video.encrypted.len());
++        assert_eq!(result.video.plaintext_bytes as usize, video.len());
++        assert_eq!(
++            decrypt_cdn(&prepared.video.encrypted, &prepared.video.aes_key).unwrap(),
++            video
++        );
++    }
+     #[test]
+     fn boundary_matrix_keeps_ciphertext_and_media_kind_limits_separate() {
+         let boundary = MAX_CDN_TRANSFER_BYTES;
+@@ -2447,4 +2535,123 @@ mod tests {
+         )
+         .is_err());
+     }
++
++    fn large_image_fixture() -> (PreparedImageUpload, Vec<u8>) {
++        let mut noise = 1u32;
++        let pixels = image::RgbImage::from_fn(800, 600, |_, _| {
++            noise ^= noise << 13;
++            noise ^= noise >> 17;
++            noise ^= noise << 5;
++            let v = noise.to_le_bytes();
++            image::Rgb([v[0], v[1], v[2]])
++        });
++        let mut original = vec![];
++        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut original, 95)
++            .encode_image(&pixels)
++            .unwrap();
++        assert!(original.len() > UPLOAD_CHUNK * 2);
++        let jpeg = |width, height| {
++            let mut out = vec![];
++            image::codecs::jpeg::JpegEncoder::new(&mut out)
++                .encode_image(&image::RgbImage::from_pixel(
++                    width,
++                    height,
++                    image::Rgb([20, 60, 90]),
++                ))
++                .unwrap();
++            out
++        };
++        let prepared = PreparedImageUpload::with_material(
++            &original,
++            &jpeg(64, 48),
++            &jpeg(16, 12),
++            "image.jpg",
++            "filehelper",
++            &[1; 16],
++            "0123456789abcdef0123456789abcdef",
++        )
++        .unwrap();
++        (prepared, original)
++    }
++    #[test]
++    fn large_image_upload_uses_complete_correlated_chunks_and_one_set_of_previews() {
++        let (prepared, original) = large_image_fixture();
++        let mut encrypted = vec![];
++        let mut requests = 0;
++        let uploaded = client()
++            .upload_image_with_transport(
++                &prepared,
++                |_, _| Ok(()),
++                |path, fields| {
++                    assert_eq!(path, "/uploadv3");
++                    assert_eq!(integer(fields, "filetype").unwrap(), 1);
++                    assert_eq!(integer(fields, "seq").unwrap(), requests + 1);
++                    assert_eq!(
++                        integer(fields, "rangestart").unwrap() as usize,
++                        encrypted.len()
++                    );
++                    let chunk = fields.get("filedata").unwrap();
++                    assert!(!chunk.is_empty() && chunk.len() <= UPLOAD_CHUNK);
++                    if requests == 0 {
++                        assert_eq!(
++                            fields.get("midimgdata").unwrap(),
++                            &prepared.standard.encrypted
++                        );
++                        assert!(fields.contains_key("thumbdata"));
++                        assert_eq!(integer(fields, "imgwidth").unwrap(), 800);
++                        assert_eq!(integer(fields, "imgheight").unwrap(), 600);
++                    } else {
++                        assert!(
++                            !fields.contains_key("midimgdata") && !fields.contains_key("thumbdata")
++                        );
++                    }
++                    encrypted.extend_from_slice(chunk);
++                    assert_eq!(
++                        integer(fields, "rangeend").unwrap() as usize + 1,
++                        encrypted.len()
++                    );
++                    let mut reply = CdnFields::from([
++                        ("retcode".into(), b"0".to_vec()),
++                        ("fileid".into(), b"synthetic-image".to_vec()),
++                    ]);
++                    for key in ["seq", "rangestart", "rangeend"] {
++                        reply.insert(key.into(), fields[key].clone());
++                    }
++                    requests += 1;
++                    Ok(reply)
++                },
++            )
++            .unwrap();
++        assert!(requests > 2);
++        assert_eq!(encrypted, prepared.original.encrypted);
++        assert_eq!(
++            decrypt_cdn(&encrypted, &prepared.original.aes_key).unwrap(),
++            original
++        );
++        assert_eq!(uploaded.original.sha256, hex::encode(sha256(&original)));
++        assert_eq!(uploaded.original.plaintext_bytes as usize, original.len());
++        assert_eq!(uploaded.original.width, Some(800));
++        assert_eq!(uploaded.original.height, Some(600));
++    }
++    #[test]
++    fn large_image_upload_stops_before_the_next_chunk_on_cancellation() {
++        let (prepared, _) = large_image_fixture();
++        let mut requests = 0;
++        let result = client().upload_image_with_transport(
++            &prepared,
++            |done, _| {
++                ensure!(done == 0, "cancelled");
++                Ok(())
++            },
++            |_, _| {
++                requests += 1;
++                Ok(CdnFields::from([
++                    ("retcode".into(), b"0".to_vec()),
++                    ("fileid".into(), b"synthetic-image".to_vec()),
++                ]))
++            },
++        );
++        assert!(result.is_err());
++        assert_eq!(requests, 1);
++    }
+ }
+diff --git a/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs b/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
+index 97702b940b4995e53c9c1a8e9af4d575b7f90865..21018356e920ccc079480562235fe435ac7a3998 100644
+--- a/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
++++ b/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
+@@ -1193,7 +1193,7 @@ mod tests {
+             MediaQuality::Video,
+             "raw-object",
+             3,
+-            wechat_media::MAX_VIDEO_SOURCE_BYTES as u32,
++            50 * 1024 * 1024,
+             &"A".repeat(32),
+         ));
+         let request =
+@@ -1225,7 +1225,7 @@ mod tests {
+                 0 => original.descriptor.quality = MediaQuality::LargeFile,
+                 1 => original.descriptor.expected_md5 = Some("0".repeat(32)),
+                 2 => {
+-                    original.plaintext_bytes += 1;
++                    original.plaintext_bytes = wechat_media::MAX_VIDEO_SOURCE_BYTES as u32 + 1;
+                     original.descriptor.expected_bytes = Some(u64::from(original.plaintext_bytes));
+                 }
+                 _ => original.descriptor.expected_bytes = None,
+diff --git a/packages/native-client-rust/crates/wechat-simulator/src/media_adapter.rs b/packages/native-client-rust/crates/wechat-simulator/src/media_adapter.rs
+index 429b9f85952a225cfbc484662a091f9fd56ebbf5..3173979e3c3b303e55ba2982f949a04d7fa3d344 100644
+--- a/packages/native-client-rust/crates/wechat-simulator/src/media_adapter.rs
++++ b/packages/native-client-rust/crates/wechat-simulator/src/media_adapter.rs
+@@ -107,7 +107,12 @@ impl MediaTransport for SimulatorMedia {
+         )?;
+         Ok(result)
+     }
+-    fn upload_image(&self, p: &PreparedImageUpload) -> Result<UploadedImage> {
++    fn upload_image(
++        &self,
++        p: &PreparedImageUpload,
++        progress: Progress<'_>,
++    ) -> Result<UploadedImage> {
++        progress(0, Some(p.original.encrypted.len() as u64))?;
+         Ok(UploadedImage {
+             original: self.upload_object(
+                 &p.original,
+diff --git a/packages/native-client-rust/crates/wechat-store/src/media.rs b/packages/native-client-rust/crates/wechat-store/src/media.rs
+index 288d0e187c94344888f49f08fe0f1322db955abd..f1d83415f6f3893a0cc62f6940b97b659ea64cd8 100644
+--- a/packages/native-client-rust/crates/wechat-store/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-store/src/media.rs
+@@ -197,7 +197,7 @@ impl Store {
+                 || name.len() > 255
+                 || media_type.len() > 128
+                 || byte_length == 0
+-                || byte_length > wechat_media::MAX_FILE_BYTES as u64
++                || byte_length > wechat_media::MAX_MEDIA_SOURCE_BYTES as u64
+                 || sha256.len() != 64
+             {
+                 bail!("invalid media source");
+@@ -967,7 +967,7 @@ mod tests {
+     #[test]
+     fn source_limits_and_asset_metadata_do_not_require_payload_copies() {
+         let (_t, store) = setup();
+-        let max = wechat_media::MAX_FILE_BYTES as u64;
++        let max = wechat_media::MAX_MEDIA_SOURCE_BYTES as u64;
+         let hash = "0".repeat(64);
+         store
+             .create_media_source(
+@@ -1041,11 +1041,13 @@ mod tests {
+         );
+         store
+             .control("test", |db| {
+-                // zeroblob is lazy here: validate SQLite's scalar/record capacity
+-                // without writing or materializing a maximum-size attachment.
++                // The existing ordinary-file control still fits SQLite. The
++                // video descriptor's integer boundary is not a promise about
++                // this connection's maximum BLOB size or available memory.
++                let control_bytes = wechat_media::MAX_FILE_BYTES as u64 + 29;
+                 let length: u64 =
+-                    db.query_row("SELECT length(zeroblob(?1))", [max + 29], |r| r.get(0))?;
+-                assert_eq!(length, max + 29);
++                    db.query_row("SELECT length(zeroblob(?1))", [control_bytes], |r| r.get(0))?;
++                assert_eq!(length, control_bytes);
+                 Ok(())
+             })
+             .unwrap();
+diff --git a/packages/native-client-rust/crates/wechat-store/src/vault.rs b/packages/native-client-rust/crates/wechat-store/src/vault.rs
+index ebf0a7113f2706e657e2233b51a12a8808d2da81..50fb82a4ca7b21e7e1bfe10ce9b291d5efa1c01a 100644
+--- a/packages/native-client-rust/crates/wechat-store/src/vault.rs
++++ b/packages/native-client-rust/crates/wechat-store/src/vault.rs
+@@ -68,7 +68,12 @@ impl Vault {
+         if !media_purpose(purpose) {
+             bail!("invalid protected media purpose");
+         }
+-        self.seal_bounded(account, purpose, plaintext, wechat_media::MAX_FILE_BYTES)
++        self.seal_bounded(
++            account,
++            purpose,
++            plaintext,
++            wechat_media::MAX_MEDIA_SOURCE_BYTES,
++        )
+     }
+     fn seal_bounded(
+         &self,
+@@ -112,7 +117,12 @@ impl Vault {
+         if !media_purpose(purpose) {
+             bail!("invalid protected media purpose");
+         }
+-        self.open_bounded(account, purpose, record, wechat_media::MAX_FILE_BYTES)
++        self.open_bounded(
++            account,
++            purpose,
++            record,
++            wechat_media::MAX_MEDIA_SOURCE_BYTES,
++        )
+     }
+     fn open_bounded(
+         &self,
+diff --git a/packages/shared/src/native.generated.ts b/packages/shared/src/native.generated.ts
+index 83adfb29eeac3219bc21220f395715d3a796ec84..2cb406c46178a24bffdf901746e6f3343dafbd8e 100644
+--- a/packages/shared/src/native.generated.ts
++++ b/packages/shared/src/native.generated.ts
+@@ -1,7 +1,7 @@
+ // Generated from wechat-api/src/contracts.rs. Do not edit.
+ export const NATIVE_MAX_SOURCE_BYTES = 536870912 as const;
+ export const NATIVE_MAX_ORDINARY_SOURCE_BYTES = 26214383 as const;
+-export const NATIVE_MAX_VIDEO_SOURCE_BYTES = 52428800 as const;
++export const NATIVE_MAX_VIDEO_SOURCE_BYTES = 4294967279 as const;
+ export type CallCapabilities = { directAudio?: boolean, directVideo?: boolean, conferenceAudio?: boolean, conferenceVideo?: boolean, };
+ export type CallAudioFormat = { sampleRate: number, channels: number, frameMs: number, };
+ export type CallTarget = { "kind": "direct", contactId: string, } | { "kind": "conference", groupId: string, invitees: Array<string>, };

@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -46,7 +46,9 @@ def no_telemetry(monkeypatch):
     monkeypatch.setattr(Metric, "upload", upload)
 
 
-async def make_adapter(serve, tmp_path, msg=None, *, media_data=VALID_JPEG, **options):
+async def make_adapter(
+    serve, tmp_path, msg=None, *, media_data=VALID_JPEG, framework_settings=None, **options
+):
     msg = msg or message()
     sent = []
 
@@ -85,10 +87,10 @@ async def make_adapter(serve, tmp_path, msg=None, *, media_data=VALID_JPEG, **op
         )
 
     url = await serve(handler)
-    cls = module("adapter").WeChatNativeAdapter
+    cls = module("adapter").WeBridgeAdapter
     queue = asyncio.Queue()
     cfg = {"id": "native-a", "server_url": url, "account_id": "a", "token": "fake", **options}
-    adapter = cls(cfg, {}, queue, state_dir=tmp_path)
+    adapter = cls(cfg, framework_settings or {}, queue, state_dir=tmp_path)
     await adapter.client.open()
     adapter.bot_self_id = "bot"
     return adapter, queue, msg, sent
@@ -123,53 +125,6 @@ async def test_private_event_real_framework_lifecycle_and_reply(serve, tmp_path)
     assert adapter.client.closed
 
 
-@pytest.mark.parametrize(
-    "updates,options,origin",
-    [
-        ({"direction": "outgoing"}, {}, "live"),
-        ({"senderId": "bot"}, {}, "live"),
-        ({"type": 3}, {"enable_media": False}, "live"),
-        ({"type": 47}, {}, "live"),
-        (
-            {"threadId": "room@chatroom", "type": 3, "body": ""},
-            {"group_reply_mode": "all"},
-            "live",
-        ),
-        ({"recall": {"observedAt": "now"}}, {}, "live"),
-        ({}, {}, "history"),
-        ({}, {}, "unknown"),
-        ({"createdAt": (datetime.now(UTC) - timedelta(days=1)).isoformat()}, {}, "live"),
-        ({}, {"enable_private_reply": False}, "live"),
-        ({}, {"allowed_users": ["other"]}, "live"),
-        ({"threadId": "room@chatroom"}, {}, "live"),
-        ({"threadId": "room@chatroom", "mentions": {"state": "unknown", "self": True}}, {}, "live"),
-        (
-            {
-                "threadId": "room@chatroom",
-                "mentions": {"state": "known", "self": False, "all": True},
-            },
-            {},
-            "live",
-        ),
-        ({"threadId": "room@chatroom"}, {"group_reply_mode": "disabled"}, "live"),
-        (
-            {"threadId": "room@chatroom"},
-            {"group_reply_mode": "all", "allowed_groups": ["other"]},
-            "live",
-        ),
-    ],
-)
-async def test_policy_drops_without_model_dispatch(serve, tmp_path, updates, options, origin):
-    adapter, queue, msg, sent = await make_adapter(serve, tmp_path, message(**updates), **options)
-    try:
-        await adapter.process_native_event(native_event(msg, origin=origin))
-        assert queue.empty()
-        assert sent == []
-        assert adapter.state.cursor == "1"
-    finally:
-        await adapter.terminate()
-
-
 async def test_group_mentions_isolation_and_reply_target(serve, tmp_path):
     from astrbot.api.event import MessageChain
     from astrbot.api.message_components import At, Plain
@@ -180,7 +135,7 @@ async def test_group_mentions_isolation_and_reply_target(serve, tmp_path):
         await adapter.process_native_event(native_event(msg))
         event = queue.get_nowait()
         assert event.get_group_id() == "room@chatroom"
-        assert event.session.session_id == "a|group|room%40chatroom|user"
+        assert event.session.session_id == "a|group|room%40chatroom"
         assert isinstance(event.message_obj.message[0], At)
         await event.send(MessageChain([At(qq="user"), Plain("answer")]))
         assert sent[0][1] == {
@@ -190,120 +145,7 @@ async def test_group_mentions_isolation_and_reply_target(serve, tmp_path):
         }
         msg.update(id="m2", senderId="other")
         await adapter.process_native_event(native_event(msg, "2"))
-        assert queue.get_nowait().session.session_id != event.session.session_id
-    finally:
-        await adapter.terminate()
-
-
-@pytest.mark.parametrize(
-    "outcome",
-    [
-        "accepted",
-        "recalled",
-        "failed",
-        "failed_recalled",
-        "explicit_failed",
-        "quote_failed",
-        "auth_failed",
-        "identity_failed",
-    ],
-)
-async def test_new_group_refreshes_before_single_send_and_rechecks_recall(serve, tmp_path, outcome):
-    from astrbot.api.event import MessageChain
-    from astrbot.api.message_components import At, Plain, Reply
-
-    requests = []
-    refreshed = False
-    msg = message(threadId="room@chatroom", mentions={"state": "known", "self": True})
-
-    async def serve_new_group(handler):
-        async def native(req):
-            nonlocal refreshed
-            requests.append((req.method, req.path))
-            if req.path.endswith("/members/refresh"):
-                return web.json_response(
-                    {"id": "op1", "accountId": "a", "kind": "metadata", "state": "queued"},
-                    status=202,
-                )
-            if "/operations/" in req.path:
-                refreshed = True
-                if outcome in {"recalled", "failed_recalled"}:
-                    msg["recall"] = {"observedAt": "now"}
-                return web.json_response(
-                    {
-                        "id": "op1",
-                        "accountId": "a",
-                        "kind": "metadata",
-                        "state": "succeeded" if outcome in {"accepted", "recalled"} else "failed",
-                        "result": {
-                            "code": {
-                                "auth_failed": "auth_required",
-                                "identity_failed": "account_identity_mismatch",
-                            }.get(outcome, "operation_failed"),
-                            "details": "fake-token PRIVATE CHAT",
-                        },
-                    }
-                )
-            if ("/members/" in req.path or req.path.endswith("/sends")) and not refreshed:
-                return web.json_response({"error": {"code": "media_not_cached"}}, status=404)
-            if req.path.endswith("/sends") and outcome not in {"accepted", "recalled"}:
-                assert "mentions" not in await req.json()
-            return await handler(req)
-
-        return await serve(native)
-
-    adapter, queue, _, sent = await make_adapter(serve_new_group, tmp_path, msg)
-    adapter.client.poll_interval = 0.001
-    try:
-        await adapter.process_native_event(native_event(msg))
-        event = queue.get_nowait()
-        chain = MessageChain().message("answer")
-        if outcome == "explicit_failed":
-            chain = MessageChain([At(qq="user"), Plain("answer")])
-        elif outcome == "quote_failed":
-            chain = MessageChain([Reply(id="m1"), Plain("answer")])
-        blocked = outcome in {"explicit_failed", "auth_failed", "identity_failed"}
-        delivered = outcome in {"accepted", "failed", "quote_failed"}
-        if blocked:
-            with pytest.raises(ValueError, match="群成员"):
-                await event.send(chain)
-            assert sent == []
-            assert adapter.state.message_status("m1") == "failed"
-        else:
-            await event.send(chain)
-        if outcome in {"recalled", "failed_recalled"}:
-            assert sent == []
-            assert event.is_stopped()
-            assert adapter.state.message_status("m1") == "recalled"
-        elif delivered:
-            expected = {
-                "threadId": "room@chatroom",
-                "text": "answer",
-            }
-            if outcome == "accepted":
-                expected["mentions"] = {"userIds": ["user"]}
-            elif outcome == "quote_failed":
-                expected["quote"] = {"messageId": "m1", "serverId": "900"}
-            assert sent[0][1] == expected
-            assert adapter.state.message_status("m1") == "replied"
-        assert requests.count(("POST", "/v1/accounts/a/sends")) == delivered
-        assert adapter.state.db.execute("SELECT COUNT(*) FROM sends").fetchone()[0] == delivered
-        assert requests.count(("POST", "/v1/accounts/a/groups/room@chatroom/members/refresh")) == 1
-    finally:
-        await adapter.terminate()
-
-
-async def test_all_mode_shared_session(serve, tmp_path):
-    msg = message(threadId="room@chatroom")
-    adapter, queue, msg, _ = await make_adapter(
-        serve, tmp_path, msg, group_reply_mode="all", unique_session=False
-    )
-    try:
-        await adapter.process_native_event(native_event(msg))
-        event = queue.get_nowait()
-        assert event.session.session_id == "a|group|room%40chatroom"
-        # Wake component lets AstrBot's normal waking stage accept explicit all mode.
-        assert event.message_obj.message[0].qq == "bot"
+        assert queue.get_nowait().session.session_id == event.session.session_id
     finally:
         await adapter.terminate()
 
@@ -367,7 +209,7 @@ async def test_run_reconnects_from_committed_cursor_and_stops(serve, tmp_path):
         )
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"id": "a", "server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),
@@ -394,12 +236,20 @@ def test_plugin_registers_config_in_real_astrbot():
     from astrbot.core.platform.register import platform_cls_map, platform_registry
 
     module("main")
-    assert "wechat_native" in platform_cls_map
-    metadata = next(x for x in platform_registry if x.name == "wechat_native")
-    assert metadata.adapter_display_name == "WeChat Native"
+    assert "webridge" in platform_cls_map
+    metadata = next(x for x in platform_registry if x.name == "webridge")
+    assert metadata.adapter_display_name == "微信消息适配器"
+    assert metadata.default_config_tmpl["type"] == "webridge"
+    assert metadata.default_config_tmpl["id"] == "webridge"
+    assert metadata.default_config_tmpl["account_id"] == ""
     assert not metadata.support_streaming_message
-    assert metadata.config_metadata["token_file"]["type"] == "string"
-    assert metadata.default_config_tmpl["group_reply_mode"] == "mention"
+    assert metadata.config_metadata["account_id"]["type"] == "string"
+    assert set(metadata.default_config_tmpl) == {
+        "id",
+        "type",
+        "enable",
+        "account_id",
+    }
 
 
 async def test_platform_icon_is_served_through_astrbot_file_api():
@@ -411,13 +261,13 @@ async def test_platform_icon_is_served_through_astrbot_file_api():
     from fastapi import FastAPI
 
     module("main")
-    metadata = next(item for item in platform_registry if item.name == "wechat_native")
+    metadata = next(item for item in platform_registry if item.name == "webridge")
     service = ConfigDisplayService.__new__(ConfigDisplayService)
     service._logo_token_cache = {}
-    templates = {"wechat_native": metadata.default_config_tmpl.copy()}
+    templates = {"webridge": metadata.default_config_tmpl.copy()}
     await service.register_platform_logo(metadata, templates)
-    token = templates["wechat_native"].get("logo_token")
-    assert token, "WeChat Native must provide a resolvable platform icon"
+    token = templates["webridge"].get("logo_token")
+    assert token, "微信消息适配器 must provide a resolvable platform icon"
 
     app = FastAPI()
     app.state.services = SimpleNamespace(files=FileService())
@@ -455,7 +305,7 @@ async def test_startup_retries_and_preserves_framework_instance_identity(serve, 
         )
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),
@@ -495,7 +345,7 @@ async def test_concurrent_sends_stop_after_unknown_receipt(serve, tmp_path):
         return web.json_response(msg)
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),
@@ -543,7 +393,7 @@ async def test_recall_arriving_during_source_read_blocks_submission(serve, tmp_p
         return web.json_response(msg)  # GET snapshot predates recall
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),
@@ -592,8 +442,9 @@ def test_metadata_validates_with_astrbot_loader():
     from conftest import ROOT
 
     metadata = PluginManager._load_plugin_metadata(str(ROOT))
-    assert metadata.name == "astrbot_plugin_wechat_native"
-    assert metadata.display_name == "WeChat Native"
+    assert metadata.name == "astrbot_plugin_webridge"
+    assert metadata.display_name == "微信消息适配器"
+    assert metadata.version == "1.0.0"
     assert metadata.author == "neozhu"
 
 
@@ -632,7 +483,7 @@ async def test_stop_during_pending_send_retains_uncertainty(serve, tmp_path):
         return web.json_response(msg)
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),
@@ -731,42 +582,6 @@ async def test_group_mention_prefix_normalization_keeps_raw_body(
         await adapter.terminate()
 
 
-@pytest.mark.parametrize("offset", [-600, 120])
-async def test_live_time_rejections_warn_without_content_and_are_rate_limited(
-    serve, tmp_path, monkeypatch, offset
-):
-    now = datetime.now(UTC).replace(microsecond=0)
-    msg = message(body="PRIVATE BODY", createdAt=(now + timedelta(seconds=offset)).isoformat())
-    adapter, queue, _, _ = await make_adapter(serve, tmp_path, msg)
-    clock = [0.0]
-    warnings = []
-    adapter_module = module("adapter")
-    monkeypatch.setattr(
-        adapter_module,
-        "time",
-        SimpleNamespace(time=lambda: now.timestamp(), monotonic=lambda: clock[0]),
-    )
-    monkeypatch.setattr(
-        adapter_module.logger, "warning", lambda text, *args: warnings.append(text % args)
-    )
-    try:
-        await adapter.process_native_event(native_event(msg))
-        msg["id"] = "m2"
-        await adapter.process_native_event(native_event(msg, "2"))
-        assert len(warnings) == 1
-        clock[0] = 61
-        msg["id"] = "m3"
-        await adapter.process_native_event(native_event(msg, "3"))
-        assert len(warnings) == 2
-        assert "PRIVATE BODY" not in " ".join(warnings)
-        assert str(abs(offset)) in warnings[0]
-        assert queue.empty()
-        assert adapter.state.cursor == "3"
-        assert adapter.state.message_status("m1") == "ignored"
-    finally:
-        await adapter.terminate()
-
-
 async def test_empty_output_is_no_reply_across_restart(serve, tmp_path):
     from astrbot.api.event import MessageChain
 
@@ -785,7 +600,7 @@ async def test_empty_output_is_no_reply_across_restart(serve, tmp_path):
         state.close()
 
 
-async def test_split_group_reply_only_auto_mentions_first_successful_segment(serve, tmp_path):
+async def test_split_group_reply_only_sends_explicit_mentions(serve, tmp_path):
     from astrbot.api.event import MessageChain
     from astrbot.api.message_components import At, Plain
 
@@ -799,7 +614,7 @@ async def test_split_group_reply_only_auto_mentions_first_successful_segment(ser
         await event.send(MessageChain().message("second"))
         await event.send(MessageChain([At(qq="other"), Plain("explicit")]))
         assert [payload.get("mentions") for _, payload in sent] == [
-            {"userIds": ["user"]},
+            None,
             None,
             {"userIds": ["other"]},
         ]
@@ -854,7 +669,7 @@ async def test_later_receipt_failure_keeps_partial_success(serve, tmp_path, fail
         return web.json_response(msg)
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),
@@ -918,7 +733,7 @@ async def test_cancelled_waiting_segment_cannot_be_cleared_by_inflight_success(
         return web.json_response(msg)
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),
@@ -958,21 +773,19 @@ async def test_cancelled_waiting_segment_cannot_be_cleared_by_inflight_success(
 @pytest.mark.parametrize(
     "payload,body", [(VALID_JPEG, ""), (VALID_PNG, None), (VALID_JPEG, "看图")]
 )
-async def test_private_direct_image_delivers_astrbot_image_and_default_prompt(
+async def test_private_direct_image_delivers_component_without_prompt(
     serve, tmp_path, payload, body
 ):
-    from astrbot.api.message_components import Image, Plain
+    from astrbot.api.message_components import Image
 
     msg = message(type=3, body=body)
     adapter, queue, _, _ = await make_adapter(serve, tmp_path, msg, media_data=payload)
     try:
         await adapter.process_native_event(native_event(msg))
         event = await asyncio.wait_for(queue.get(), 1)
-        expected_text = "看图" if body == "看图" else "请描述这张图片的内容。"
-        assert event.message_str == expected_text
+        assert event.message_str == ""
         components = event.get_messages()
-        assert [type(c) for c in components] == [Plain, Image]
-        assert components[0].text == expected_text
+        assert [type(c) for c in components] == [Image]
         await adapter.process_native_event(native_event(msg, "2"))
         assert queue.empty()
     finally:
@@ -988,7 +801,7 @@ async def test_private_direct_image_delivers_astrbot_image_and_default_prompt(
         (422, "image_format_unsupported", "暂不支持这种图片格式。"),
     ],
 )
-async def test_media_errors_send_concise_reply_without_llm_dispatch(
+async def test_media_errors_never_send_a_reply_outside_astrbot(
     serve, tmp_path, status, code, expected_reply
 ):
     msg = message(type=3, body="")
@@ -1007,7 +820,7 @@ async def test_media_errors_send_concise_reply_without_llm_dispatch(
         return web.Response(status=404)
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),
@@ -1018,8 +831,8 @@ async def test_media_errors_send_concise_reply_without_llm_dispatch(
         await adapter.process_native_event(native_event(msg))
         await asyncio.gather(*list(adapter._media_tasks))
         assert adapter._event_queue.empty()
-        assert sent == [{"threadId": "peer", "text": expected_reply}]
-        assert adapter.state.message_status("m1") == "replied"
+        assert sent == []
+        assert adapter.state.message_status("m1") == "failed"
     finally:
         await adapter.terminate()
 
@@ -1042,7 +855,7 @@ async def test_triggering_image_recall_during_download_silently_cancels(serve, t
         return web.json_response(msg)
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),
@@ -1092,7 +905,7 @@ async def test_slow_media_download_does_not_block_concurrent_text_messages(serve
 
     url = await serve(handler)
     queue = asyncio.Queue()
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"server_url": url, "account_id": "a", "token": "fake"},
         {},
         queue,
@@ -1107,7 +920,7 @@ async def test_slow_media_download_does_not_block_concurrent_text_messages(serve
         assert first_event.message_str == "普通文本"
         release.set()
         second_event = await asyncio.wait_for(queue.get(), 1)
-        assert second_event.message_str == "请描述这张图片的内容。"
+        assert second_event.message_str == ""
     finally:
         release.set()
         await adapter.terminate()
@@ -1125,7 +938,7 @@ async def test_terminate_during_media_download_marks_needs_review_across_restart
         return web.json_response(msg)
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),

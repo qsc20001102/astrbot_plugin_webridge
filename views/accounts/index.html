@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>微信消息适配器 · 微信管理</title>
+    <link rel="icon" type="image/png" href="./logo.png" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main>
+      <header class="page-header">
+        <div class="identity"><img class="mark" src="./logo.png" alt="" width="44" height="44" /><div><h1>微信消息适配器</h1><p>登录微信，一键接入 AstrBot</p></div></div>
+        <span id="engine-status" class="badge" role="status">正在连接</span>
+      </header>
+      <p id="notice" role="status" hidden></p>
+      <p id="error" role="alert" hidden></p>
+      <section id="engine-help" class="panel" hidden>
+        <h2>微信引擎尚未就绪</h2>
+        <p id="engine-reason">正在启动内置微信引擎。</p>
+        <button id="start-engine" type="button">重新启动</button>
+      </section>
+      <div class="layout">
+        <section class="panel account-panel">
+          <div class="section-heading"><h2>微信账号</h2><button id="refresh" class="quiet" type="button">刷新</button></div>
+          <div id="empty-state" class="empty" hidden><p>还没有微信账号</p><p>添加账号后，用手机微信扫描二维码。</p></div>
+          <label id="account-label" for="account-select" hidden>选择账号</label>
+          <select id="account-select" hidden></select>
+          <dl id="account-details" hidden><div><dt>登录状态</dt><dd id="account-state">未登录</dd></div><div><dt>消息平台</dt><dd id="platform-state">尚未接入</dd></div></dl>
+          <div class="account-actions"><button id="add-account" class="secondary" type="button" disabled>添加微信</button><button id="logout" class="quiet danger" type="button" hidden>退出登录</button></div>
+          <form id="add-form" hidden>
+            <label for="account-alias">账号名称</label>
+            <input id="account-alias" maxlength="64" value="我的微信" autocomplete="off" required />
+            <div class="button-row"><button id="create-account" type="submit">添加并登录</button><button id="cancel-add" class="quiet" type="button">取消</button></div>
+          </form>
+        </section>
+        <section class="panel login-panel" aria-labelledby="login-heading">
+          <h2 id="login-heading">微信登录</h2>
+          <div id="qr-placeholder" class="qr-placeholder"><img src="./logo.png" alt="" width="76" height="76" /><p>选择账号后获取登录二维码</p></div>
+          <div id="qr-content" hidden><img id="qr-image" alt="微信登录二维码" /><p id="login-status" role="status" aria-live="polite">等待扫码</p><p class="hint">请使用手机微信扫码，并在手机上确认登录。</p></div>
+          <div id="login-success" class="success" hidden><span aria-hidden="true">✓</span><h3>微信已登录</h3><p>现在可以接入 AstrBot，开始收发消息。</p></div>
+          <div class="button-row"><button id="login" type="button" disabled>获取登录二维码</button><button id="cancel-login" class="quiet" type="button" hidden>取消登录</button></div>
+        </section>
+      </div>
+      <section class="panel connect-panel"><div><h2>接入 AstrBot</h2><p>登录后即可创建消息平台。唤醒、模型和插件规则仍使用 AstrBot 配置。</p><p id="connect-result" class="hint" role="status"></p></div><button id="connect" type="button" disabled>一键接入 AstrBot</button></section>
+      <footer><span>Linux x86_64 · 内置微信引擎</span><span id="version"></span></footer>
+    </main>
+    <script type="module" src="./app.js?v=login-state-20261108"></script>
+  </body>
+</html>

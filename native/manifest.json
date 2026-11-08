@@ -1,0 +1,13 @@
+{
+  "version": "1.5.1",
+  "target": "x86_64-unknown-linux-gnu",
+  "upstream_commit": "39af1eec84f4763e1257406f8c5fb848b31d82e9",
+  "image_original": true,
+  "sha256": "bd1604f968821aae82661aa81a137ddd295bc98e9b31fc3a6fcb1448ae06b70c",
+  "patch_sha256": "b91a01a4322245c8d22a511b1a818dd1d16cf803186d89ce64c8ddddacb8b2ea",
+  "minimum_glibc": "2.36",
+  "rustc": "1.93.1",
+  "video_passthrough": true,
+  "video_size_policy": "protocol_only",
+  "incoming_video_download": false
+}

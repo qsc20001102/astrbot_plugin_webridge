@@ -4,8 +4,9 @@ import asyncio
 
 from astrbot.api.web import json_response, request
 
-from .config import ADAPTER_ID, NativeConfig
+from .config import ADAPTER_ID, PLUGIN_DISPLAY_NAME, NativeConfig
 from .native_client import NativeAPIError, NativeClient
+from .runtime import RuntimeUnavailable, get_runtime
 
 
 def _json(data):
@@ -45,10 +46,16 @@ class ConnectionView:
         bot_id = request.query.get("bot_id", "")
         robot = next((robot for robot in self._robots() if robot["id"] == bot_id), None)
         if robot is None:
-            return _result("请选择已保存的 WeChat Native 机器人")
+            return _result(f"请选择已保存的 {PLUGIN_DISPLAY_NAME} 机器人")
         try:
-            config = NativeConfig.from_dict(robot)
+            config = (
+                NativeConfig.from_dict(robot)
+                if robot.get("server_url")
+                else await get_runtime().connection(robot.get("account_id", ""))
+            )
             token = await asyncio.to_thread(config.load_token)
+        except RuntimeUnavailable as error:
+            return _result(str(error))
         except (TypeError, ValueError):
             return _result("连接配置无效，请检查地址、Account ID 和 Token 配置")
         try:

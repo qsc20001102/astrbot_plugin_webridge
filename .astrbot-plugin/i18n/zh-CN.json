@@ -1,5 +1,9 @@
 {
   "views": {
+    "accounts": {
+      "title": "微信管理",
+      "description": "扫码登录微信并一键接入 AstrBot。"
+    },
     "connection": {
       "title": "连接测试",
       "description": "检查 Native 服务连接与微信账号在线状态。"

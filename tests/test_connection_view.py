@@ -13,13 +13,13 @@ def plugin(robots):
     context = Context.__new__(Context)
     context._config = {"platform": robots}
     context.registered_web_apis = []
-    return module("main").WeChatNativePlugin(context), context
+    return module("main").WeBridgePlugin(context), context
 
 
 def saved_robot(url, **updates):
     return {
         "id": "native-1",
-        "type": "wechat_native",
+        "type": "webridge",
         "enable": False,
         "server_url": url,
         "account_id": "a",
@@ -32,7 +32,7 @@ async def api(context, endpoint, query=""):
     from astrbot.api.web import PluginRequest, bind_request_context
     from starlette.requests import Request
 
-    path = "/astrbot_plugin_wechat_native/connection/" + endpoint
+    path = "/astrbot_plugin_webridge/connection/" + endpoint
     matches = [
         (handler, methods)
         for route, handler, methods, _ in context.registered_web_apis
@@ -170,7 +170,7 @@ async def test_missing_or_wrong_robot_never_requests_native():
     for query in ("", "bot_id=other", "bot_id=unknown"):
         result = await api(context, "check", query)
         assert result["state"] == "failed"
-        assert result["reason"] == "请选择已保存的 WeChat Native 机器人"
+        assert result["reason"] == "请选择已保存的 微信消息适配器 机器人"
 
 
 async def test_invalid_or_unreadable_configuration_is_safe():
@@ -215,7 +215,7 @@ async def test_connection_view_is_discovered_by_astrbot():
     from conftest import ROOT
 
     service = PluginPageService(SimpleNamespace(plugin_store_path=str(ROOT.parent)))
-    metadata = StarMetadata(name="astrbot_plugin_wechat_native", root_dir_name=ROOT.name)
+    metadata = StarMetadata(name="astrbot_plugin_webridge", root_dir_name=ROOT.name)
     pages = await service.discover_plugin_pages(metadata)
-    assert [page.name for page in pages] == ["connection"]
+    assert [page.name for page in pages] == ["accounts", "connection"]
     assert pages[0].entry_file == "index.html"

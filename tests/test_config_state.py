@@ -17,14 +17,15 @@ def test_config_token_file_and_url(tmp_path):
     assert cfg.api_url == "https://native.example/prefix/v1"
     assert cfg.load_token() == "synthetic-test-token"
     assert "synthetic-test-token" not in repr(cfg)
-    assert cfg.group_reply_mode == "mention"
-    assert cfg.enable_media is True
-    assert config_module.DEFAULT_CONFIG["enable_media"] is True
-    assert config_module.CONFIG_METADATA["enable_media"]["type"] == "bool"
+    assert set(config_module.DEFAULT_CONFIG) == {
+        "id",
+        "type",
+        "enable",
+        "account_id",
+    }
     assert config_module.MAX_IMAGE_BYTES == 10 * 1024 * 1024
     assert config_module.MEDIA_DOWNLOAD_TIMEOUT == 60
     assert config_module.MAX_CONCURRENT_MEDIA_TASKS == 3
-    assert config_module.DEFAULT_IMAGE_PROMPT == "请描述这张图片的内容。"
 
 
 @pytest.mark.parametrize(
@@ -34,10 +35,6 @@ def test_config_token_file_and_url(tmp_path):
         {"server_url": "https://user:pass@host"},
         {"server_url": "https://host/?token=abc"},
         {"account_id": ""},
-        {"group_reply_mode": "maybe"},
-        {"allowed_users": "u1,u2"},
-        {"enable_private_reply": "false"},
-        {"enable_media": "true"},
         {"token": "bad\nheader"},
     ],
 )
@@ -48,8 +45,8 @@ def test_invalid_config_rejected(change):
         module("config").NativeConfig.from_dict(data).load_token()
 
 
-def test_convert_message_attaches_top_level_image_and_default_prompt():
-    from astrbot.api.message_components import At, Image, Plain, Reply
+def test_convert_message_attaches_image_without_a_prompt():
+    from astrbot.api.message_components import At, Image, Reply
 
     config_module = module("config")
     event_module = module("event")
@@ -73,9 +70,8 @@ def test_convert_message_attaches_top_level_image_and_default_prompt():
         "bot",
         image_bytes=png_bytes,
     )
-    assert direct.message_str == config_module.DEFAULT_IMAGE_PROMPT
-    assert [type(c) for c in direct.message] == [Plain, Image]
-    assert direct.message[0].text == config_module.DEFAULT_IMAGE_PROMPT
+    assert direct.message_str == ""
+    assert [type(c) for c in direct.message] == [Image]
 
     quoted_group = event_module.convert_message(
         {
@@ -99,8 +95,8 @@ def test_convert_message_attaches_top_level_image_and_default_prompt():
         "bot",
         image_bytes=png_bytes,
     )
-    assert quoted_group.message_str == config_module.DEFAULT_IMAGE_PROMPT
-    assert [type(c) for c in quoted_group.message] == [At, Reply, Plain, Image]
+    assert quoted_group.message_str == ""
+    assert [type(c) for c in quoted_group.message] == [At, Reply, Image]
     reply = quoted_group.message[1]
     assert reply.message_str == "[图片]"
     assert not any(isinstance(c, Image) for c in reply.chain)

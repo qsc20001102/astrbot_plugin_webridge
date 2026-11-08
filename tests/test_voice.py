@@ -4,11 +4,10 @@ import asyncio
 import base64
 import hashlib
 import io
-import re
 import sqlite3
 import struct
 import wave
-from datetime import UTC, datetime, timedelta
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -281,7 +280,7 @@ async def test_text_image_voice_order_and_tts_metadata(serve, tmp_path):
     result = await env(serve, tmp_path, message(threadId="room@chatroom"))
     adapter = result.adapter
     adapter.state.accept("1", "m1", "room@chatroom", "900", "queued")
-    event = module("event").WeChatNativeEvent(
+    event = module("event").WeBridgeEvent(
         module("event").convert_message(result.messages["m1"], adapter.native_config, "bot"),
         adapter,
     )
@@ -332,7 +331,7 @@ async def test_voice_failure_retains_job_parts_and_never_resends(
     adapter = result.adapter
     adapter.client.voice_send_timeout = 0.1
     adapter.state.accept("1", "m1", "peer", "900", "queued")
-    event = module("event").WeChatNativeEvent(
+    event = module("event").WeBridgeEvent(
         module("event").convert_message(result.messages["m1"], adapter.native_config, "bot"),
         adapter,
     )
@@ -440,94 +439,7 @@ async def test_native_wav_reaches_actual_astrbot_asr_stage(serve, tmp_path):
         await result.adapter.terminate()
 
 
-@pytest.mark.parametrize(
-    "mode,mentioned,allowed",
-    [
-        ("mention", False, False),
-        ("mention", True, True),
-        ("all", False, True),
-        ("disabled", True, False),
-    ],
-)
-async def test_direct_group_voice_wake_policy(serve, tmp_path, mode, mentioned, allowed):
-    msg = message(
-        type=34, body=None, threadId="room@chatroom", mentions={"state": "known", "self": mentioned}
-    )
-    result = await env(serve, tmp_path, msg, group_reply_mode=mode)
-    result.add_voice(msg)
-    try:
-        await drain_voice(result, msg)
-        assert result.queue.qsize() == int(allowed)
-        assert any(path.endswith("/media") for _, path in result.requests) == allowed
-        if allowed:
-            event = result.queue.get_nowait()
-            assert event.message_obj.session_id == "a|group|room%40chatroom|user"
-            assert isinstance(event.get_messages()[0], At)
-    finally:
-        await result.adapter.terminate()
-
-
-@pytest.mark.parametrize("quote", [False, True])
-async def test_group_recent_or_quoted_voice_with_real_mention(serve, tmp_path, quote):
-    voice = message(
-        id="voice-original", serverId="800", type=34, body=None, threadId="room@chatroom"
-    )
-    request = message(
-        id="request",
-        threadId="room@chatroom",
-        body="@机器人\u2005听听刚才的语音",
-        mentions={"state": "known", "self": True},
-    )
-    if quote:
-        request.update(
-            type=49,
-            appMessageType=57,
-            quote={"serverId": "800", "senderId": "user", "type": 34, "state": "unsupported"},
-        )
-    result = await env(serve, tmp_path, request)
-    result.add_voice(voice)
-    try:
-        await drain_voice(result, voice)
-        assert result.queue.empty()
-        assert not any(path.endswith("/media") for _, path in result.requests)
-        await drain_voice(result, request, "2")
-        event = result.queue.get_nowait()
-        assert event.message_str == "听听刚才的语音"
-        assert any(isinstance(part, Record) for part in event.get_messages())
-        assert event.get_extra("wechat_native_quote_original_id") == "voice-original"
-    finally:
-        await result.adapter.terminate()
-
-
-@pytest.mark.parametrize(
-    "prompt_text",
-    ["@机器人\u2005转文字", "@机器人\u2005说了啥", "@机器人\u2005转成文字"],
-)
-async def test_group_recent_voice_trigger_keywords(serve, tmp_path, prompt_text):
-    voice = message(
-        id="voice-original", serverId="800", type=34, body=None, threadId="room@chatroom"
-    )
-    request = message(
-        id="request",
-        threadId="room@chatroom",
-        body=prompt_text,
-        mentions={"state": "known", "self": True},
-    )
-    result = await env(serve, tmp_path, request)
-    result.add_voice(voice)
-    try:
-        await drain_voice(result, voice)
-        await drain_voice(result, request, "2")
-        event = result.queue.get_nowait()
-        expected = re.sub(r"^(?:@[^\u2005\r\n]+\u2005[ \t]*)+", "", prompt_text)
-        assert event.message_str == expected
-        assert any(isinstance(part, Record) for part in event.get_messages())
-        assert event.get_extra("wechat_native_quote_original_id") == "voice-original"
-    finally:
-        await result.adapter.terminate()
-
-
-async def test_missing_quoted_voice_reports_expired(serve, tmp_path):
+async def test_missing_quoted_voice_preserves_text_without_replying(serve, tmp_path):
     request = message(
         id="request",
         threadId="room@chatroom",
@@ -540,36 +452,8 @@ async def test_missing_quoted_voice_reports_expired(serve, tmp_path):
     result = await env(serve, tmp_path, request)
     try:
         await drain_voice(result, request)
-        assert result.queue.empty()
-        assert len(result.posts) == 1
-        assert "引用的语音已失效" in result.posts[0][1]["text"]
-    finally:
-        await result.adapter.terminate()
-
-
-@pytest.mark.parametrize(
-    "options,changes",
-    [
-        ({"enable_media": False}, {}),
-        ({"enable_private_reply": False}, {}),
-        ({"allowed_users": ["other"]}, {}),
-        (
-            {"allowed_groups": ["other@chatroom"], "group_reply_mode": "all"},
-            {"threadId": "room@chatroom"},
-        ),
-        ({}, {"direction": "outgoing"}),
-        ({}, {"senderId": "bot"}),
-        ({}, {"createdAt": (datetime.now(UTC) - timedelta(minutes=6)).isoformat()}),
-    ],
-)
-async def test_voice_respects_existing_admission_rules(serve, tmp_path, options, changes):
-    msg = message(type=34, body=None, **changes)
-    result = await env(serve, tmp_path, msg, **options)
-    result.add_voice(msg)
-    try:
-        await drain_voice(result, msg)
-        assert result.queue.empty()
-        assert not any(path.endswith(("/media", "/content")) for _, path in result.requests)
+        assert result.queue.get_nowait().message_str == "帮我听听"
+        assert result.posts == []
     finally:
         await result.adapter.terminate()
 
@@ -609,8 +493,7 @@ async def test_bad_inbound_voice_never_reaches_asr(serve, tmp_path, monkeypatch,
     try:
         await drain_voice(result, msg)
         assert result.queue.empty()
-        assert len(result.posts) == 1
-        assert any(word in result.posts[0][1]["text"] for word in ("语音", "音频"))
+        assert result.posts == []
     finally:
         await result.adapter.terminate()
 
@@ -701,7 +584,7 @@ def test_pending_voice_part_receipts_survive_restart(tmp_path):
 
 def test_voice_schema_addition_preserves_old_image_outbox(tmp_path):
     path = tmp_path / "old.sqlite3"
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute(
             "CREATE TABLE sends (key TEXT PRIMARY KEY, message_id TEXT, "
             "thread TEXT NOT NULL, state TEXT NOT NULL, send_id TEXT)"
@@ -761,7 +644,7 @@ async def test_voice_shutdown_after_first_note_keeps_partial_receipts(serve, tmp
     adapter = result.adapter
     adapter.client.voice_send_timeout = 30
     adapter.state.accept("1", "m1", "peer", "900", "queued")
-    event = module("event").WeChatNativeEvent(
+    event = module("event").WeBridgeEvent(
         module("event").convert_message(msg, adapter.native_config, "bot"), adapter
     )
     task = asyncio.create_task(
@@ -812,47 +695,6 @@ async def test_voice_changed_part_receipt_cannot_replace_accepted_identity(
         assert saved[0]["duration_ms"] == 100
         assert result.adapter.state.send_record(result.posts[0][0])["state"] == "needs_review"
         assert len(result.posts) == 1
-    finally:
-        await result.adapter.terminate()
-
-
-@pytest.mark.parametrize("case", ["other_sender", "other_group", "expired", "recalled"])
-async def test_recent_voice_is_scoped_fresh_and_not_recalled(serve, tmp_path, case):
-    voice = message(
-        id="voice-original", serverId="800", type=34, body=None, threadId="room@chatroom"
-    )
-    request = message(
-        id="request",
-        threadId="room@chatroom",
-        body="@机器人\u2005听听刚才的语音",
-        mentions={"state": "known", "self": True},
-    )
-    if case == "other_sender":
-        voice["senderId"] = "other"
-    elif case == "other_group":
-        voice["threadId"] = "other@chatroom"
-    elif case == "expired":
-        voice["createdAt"] = (datetime.now(UTC) - timedelta(seconds=121)).isoformat()
-    result = await env(serve, tmp_path, request)
-    result.add_voice(voice)
-    try:
-        await drain_voice(result, voice)
-        if case == "recalled":
-            await result.adapter.process_native_event(
-                {
-                    "cursor": "2",
-                    "kind": "message.recalled",
-                    "data": {
-                        "threadId": "room@chatroom",
-                        "serverId": "800",
-                        "messageId": "voice-original",
-                    },
-                }
-            )
-        await drain_voice(result, request, "3")
-        assert result.queue.empty()
-        assert not any(path.endswith("/content") for _, path in result.requests)
-        assert "未找到" in result.posts[-1][1]["text"]
     finally:
         await result.adapter.terminate()
 

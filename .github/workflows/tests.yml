@@ -31,4 +31,5 @@ jobs:
       - name: Compile plugin modules
         run: >-
           python -m compileall -q main.py adapter.py config.py event.py native_client.py state.py
-          connection_view.py loop_guard.py tool_support.py history_tools.py wechat_actions.py
+          connection_view.py
+          native_ui.py runtime.py

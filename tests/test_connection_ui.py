@@ -29,7 +29,12 @@ def page(browser):
         if not path.is_file():
             route.fulfill(status=404, body="not found")
         else:
-            mime = {".html": "text/html", ".js": "text/javascript", ".css": "text/css"}
+            mime = {
+                ".html": "text/html",
+                ".js": "text/javascript",
+                ".css": "text/css",
+                ".png": "image/png",
+            }
             route.fulfill(path=path, content_type=mime[path.suffix])
 
     page.route("http://plugin.test/**", asset)
@@ -73,7 +78,7 @@ def complete(page, result, index=0):
 
 def test_four_states_single_automatic_check_and_manual_retry(page):
     open_view(page, [{"id": "native-1"}])
-    expect(page.get_by_role("heading", name="WeChat Native")).to_be_visible()
+    expect(page.get_by_role("heading", name="微信消息适配器")).to_be_visible()
     expect(page.locator("#connection-status")).to_have_text("未检测")
     start_check(page)
     expect(page.locator("#connection-status")).to_have_text("检测中")
@@ -120,7 +125,7 @@ def test_no_configured_robot_has_useful_empty_state(page):
     page.evaluate("window.releaseReady({})")
     expect(page.locator("#connection-status")).to_have_text("连接失败")
     expect(page.locator("#failure-reason")).to_have_text(
-        "请先在机器人配置中保存 WeChat Native 机器人"
+        "请先在机器人配置中保存 微信消息适配器 机器人"
     )
     assert page.evaluate("window.pendingChecks.length") == 0
 

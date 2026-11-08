@@ -113,7 +113,7 @@ async def image_adapter(serve, tmp_path, *, thread="peer", outcome="accepted", f
         return web.json_response({}, status=404)
 
     url = await serve(handler)
-    adapter = module("adapter").WeChatNativeAdapter(
+    adapter = module("adapter").WeBridgeAdapter(
         {"id": "native-a", "server_url": url, "account_id": "a", "token": "fake"},
         {},
         asyncio.Queue(),
@@ -123,10 +123,11 @@ async def image_adapter(serve, tmp_path, *, thread="peer", outcome="accepted", f
     adapter.bot_self_id = "bot"
     adapter.client.poll_interval = 0.001
     adapter.client.send_timeout = 1
+    adapter.client.video_send_timeout = 1
     # Seed the incoming event without invoking unrelated inbound-media policy.
     adapter.state.accept("1", "m1", thread, "900", "queued")
     converted = module("event").convert_message(msg, adapter.native_config, "bot")
-    event = module("event").WeChatNativeEvent(converted, adapter)
+    event = module("event").WeBridgeEvent(converted, adapter)
     return adapter, event, requests, uploads, posts, jobs
 
 
@@ -194,9 +195,7 @@ async def test_multiple_images_and_mixed_order(serve, tmp_path, thread, proactiv
             if mixed
             else ["source-1", "source-2"]
         )
-        if thread.endswith("@chatroom") and mixed and not proactive:
-            assert posts[0][1]["mentions"] == {"userIds": ["user"]}
-            assert all("mentions" not in payload for _, payload in posts[1:])
+        assert all("mentions" not in payload for _, payload in posts)
     finally:
         await adapter.terminate()
 
@@ -246,6 +245,7 @@ async def test_upload_success_send_failure_blocks_resend(serve, tmp_path, outcom
     adapter, event, _, uploads, posts, _ = await image_adapter(serve, tmp_path, outcome=outcome)
     if outcome in {"queued", "running", "read503", "missing_receipt"}:
         adapter.client.send_timeout = 0.1
+        adapter.client.video_send_timeout = 0.1
     try:
         with pytest.raises(Exception):
             await event.send(MessageChain([Image.fromBytes(VALID_JPEG), Plain("must not send")]))

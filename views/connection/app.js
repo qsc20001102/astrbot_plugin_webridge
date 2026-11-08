@@ -37,7 +37,7 @@ async function checkConnection() {
       botsLoaded = result.bots.length > 0;
     }
     if (!select.value) {
-      render("failed", null, "请先在机器人配置中保存 WeChat Native 机器人");
+      render("failed", null, "请先在机器人配置中保存 微信消息适配器 机器人");
       return;
     }
     const result = await bridge.apiGet("connection/check", { bot_id: select.value });

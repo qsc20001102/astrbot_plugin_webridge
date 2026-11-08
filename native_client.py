@@ -22,17 +22,23 @@ from astrbot.api import logger
 
 from .config import (
     MAX_IMAGE_BYTES,
-    MAX_PDF_BYTES,
-    MAX_PDF_PAGES,
-    MAX_PDF_TEXT_CHARS,
     MAX_VOICE_BYTES,
     MAX_VOICE_SECONDS,
     MEDIA_DOWNLOAD_TIMEOUT,
+    VIDEO_DOWNLOAD_TIMEOUT,
+    VIDEO_PROTOCOL_MAX_BYTES,
+    VIDEO_SEND_TIMEOUT,
     VOICE_SEND_TIMEOUT,
 )
 from .state import cursor_number
 
 _SAFE_CODES = {
+    "operation_in_progress",
+    "idempotency_conflict",
+    "login_challenge_unavailable",
+    "login_challenge_superseded",
+    "account_sign_out_required",
+    "auth_required",
     "event_cursor_expired",
     "invalid_cursor",
     "unauthorized",
@@ -93,17 +99,13 @@ MEDIA_ERROR_MESSAGES = {
     "recent_unavailable": "未找到你在本群最近2分钟发送的图片，请重新发送或引用图片。",
 }
 
-PDF_ERROR_MESSAGES = {
-    "unavailable": "PDF 文件无法读取，请重新发送。",
-    "expired": "引用的 PDF 文件已失效，请重新发送。",
-    "too_large": "PDF 文件太大，暂时无法处理。",
-    "missing_scope": "文件读取功能未正确配置，请联系管理员。",
-    "unsupported_format": "PDF 文件已损坏或格式无效，请检查后重试。",
+VIDEO_ERROR_MESSAGES = {
+    "unavailable": "视频无法读取，请重新发送。",
+    "expired": "引用的视频已失效，请重新发送。",
+    "too_large": "视频超出当前传输协议可表示的大小。",
+    "missing_scope": "视频读取功能未正确配置，请联系管理员。",
+    "unsupported_format": "暂不支持这种视频格式。",
     "recalled": "",
-    "recent_unavailable": "未找到你在本群最近2分钟发送的 PDF 文件，请重新发送或引用该文件。",
-    "encrypted_pdf": "该 PDF 文件已加密，暂时无法解析内容。",
-    "empty_pdf_text": "未能从该 PDF 中提取到文字（可能是扫描件或纯图片 PDF），暂时无法解析。",
-    "not_pdf": "",
 }
 
 VOICE_ERROR_MESSAGES = {
@@ -136,8 +138,8 @@ class NativeAPIError(Exception):
 
 class MediaError(Exception):
     def __init__(self, reason: str = "unavailable", *, media_kind: str = "image"):
-        self.media_kind = media_kind if media_kind in {"pdf", "voice"} else "image"
-        messages = {"pdf": PDF_ERROR_MESSAGES, "voice": VOICE_ERROR_MESSAGES}.get(
+        self.media_kind = media_kind if media_kind in {"video", "voice"} else "image"
+        messages = {"video": VIDEO_ERROR_MESSAGES, "voice": VOICE_ERROR_MESSAGES}.get(
             self.media_kind, MEDIA_ERROR_MESSAGES
         )
         self.reason = reason if reason in messages else "unavailable"
@@ -251,85 +253,54 @@ def _map_media_code(
     return MediaError("unavailable", media_kind=media_kind)
 
 
-def is_pdf_filename(filename: str | None) -> bool:
-    if not isinstance(filename, str):
-        return False
-    cleaned = filename.strip()
-    if (
-        not cleaned
-        or len(cleaned) > 255
-        or "/" in cleaned
-        or "\\" in cleaned
-        or any(ord(c) < 32 or ord(c) == 127 for c in cleaned)
-    ):
-        return False
-    return cleaned.lower().endswith(".pdf")
-
-
-def validate_pdf_bytes(data: bytes, *, max_bytes: int = MAX_PDF_BYTES) -> str:
+def validate_video_bytes(data: bytes, *, max_bytes: int = VIDEO_PROTOCOL_MAX_BYTES) -> str:
+    """Check the MOV-family container; Native owns codec checks and preparation."""
     if not isinstance(data, (bytes, bytearray)) or not data:
-        raise MediaError("unavailable", media_kind="pdf")
+        raise MediaError("unavailable", media_kind="video")
     if len(data) > max_bytes:
-        raise MediaError("too_large", media_kind="pdf")
-    if data[:4].lower() == b"wxgf" or data.lstrip()[:1] == b"<":
-        raise MediaError("unsupported_format", media_kind="pdf")
-    header_pos = data[:1024].find(b"%PDF-")
-    if header_pos < 0 or len(data) < header_pos + 8:
-        raise MediaError("unsupported_format", media_kind="pdf")
-    return "application/pdf"
-
-
-def extract_pdf_text(
-    data: bytes,
-    *,
-    max_bytes: int = MAX_PDF_BYTES,
-    max_pages: int = MAX_PDF_PAGES,
-    max_chars: int = MAX_PDF_TEXT_CHARS,
-) -> str:
-    """Extract bounded text from an in-memory PDF. Nothing is written to disk."""
-    validate_pdf_bytes(data, max_bytes=max_bytes)
-    try:
-        from pypdf import PdfReader
-
-        reader = PdfReader(io.BytesIO(bytes(data)), strict=False)
-        if reader.is_encrypted:
-            try:
-                decrypted = reader.decrypt("")
-            except Exception:
-                decrypted = 0
-            if not decrypted:
-                raise MediaError("encrypted_pdf", media_kind="pdf")
-        total_pages = len(reader.pages)
-    except MediaError:
-        raise
-    except Exception:
-        raise MediaError("unsupported_format", media_kind="pdf") from None
-    if total_pages <= 0:
-        raise MediaError("empty_pdf_text", media_kind="pdf")
-    sections: list[str] = []
-    size = 0
-    try:
-        for index in range(min(total_pages, max_pages)):
-            text = (reader.pages[index].extract_text() or "").replace("\x00", "").strip()
-            if not text:
-                continue
-            section = f"[第 {index + 1} 页]\n{text}"
-            sections.append(section)
-            size += len(section) + 2
-            if size > max_chars:
-                break
-    except Exception:
-        if not sections:
-            raise MediaError("unsupported_format", media_kind="pdf") from None
-    if not sections:
-        raise MediaError("empty_pdf_text", media_kind="pdf")
-    combined = "\n\n".join(sections)
-    truncated = total_pages > max_pages or len(combined) > max_chars
-    if len(combined) > max_chars:
-        combined = combined[:max_chars].rstrip()
-    if truncated:
-        combined += f"\n\n[注：该 PDF 共 {total_pages} 页，内容已截取前部供分析]"
-    return combined
+        raise MediaError("too_large", media_kind="video")
+    offset = boxes = 0
+    movie = media = file_type = False
+    content_type = "video/quicktime"
+    while offset < len(data):
+        boxes += 1
+        if boxes > 65536 or len(data) - offset < 8:
+            raise MediaError("unsupported_format", media_kind="video")
+        size = int.from_bytes(data[offset : offset + 4], "big")
+        header = 8
+        if size == 0:
+            size = len(data) - offset
+        elif size == 1:
+            if len(data) - offset < 16:
+                raise MediaError("unsupported_format", media_kind="video")
+            size = int.from_bytes(data[offset + 8 : offset + 16], "big")
+            header = 16
+        if size < header or size > len(data) - offset:
+            raise MediaError("unsupported_format", media_kind="video")
+        kind = data[offset + 4 : offset + 8]
+        if kind == b"ftyp":
+            if file_type or size < header + 8 or (size - header) % 4:
+                raise MediaError("unsupported_format", media_kind="video")
+            file_type = True
+            brand = data[offset + header : offset + header + 4]
+            if brand == b"qt  ":
+                content_type = "video/quicktime"
+            elif brand.startswith(b"3g2"):
+                content_type = "video/3gpp2"
+            elif brand.startswith(b"3g"):
+                content_type = "video/3gpp"
+            elif brand in {b"mjp2", b"mj2s"}:
+                content_type = "video/mj2"
+            else:
+                content_type = "video/mp4"
+        elif kind == b"moov":
+            movie = size > header
+        elif kind == b"mdat":
+            media |= size > header
+        offset += size
+    if not movie or not media:
+        raise MediaError("unsupported_format", media_kind="video")
+    return content_type
 
 
 def _jpeg_has_end_marker(data: bytes | bytearray) -> bool:
@@ -526,6 +497,12 @@ async def load_outgoing_image(image) -> tuple[bytes, str]:
     return await _load_outgoing_media(image.url or image.file or image.path, kind="image")
 
 
+async def load_outgoing_video(video) -> tuple[bytes, str]:
+    # _resolve_file_source does no downloading. Keep our credential-free
+    # URL reader instead of Video.convert_to_file_path's general downloader.
+    return await _load_outgoing_media(await video._resolve_file_source(), kind="video")
+
+
 async def load_outgoing_voice(record) -> tuple[bytes, str]:
     # Match Record's file -> url -> path fallback without using its URL downloader
     # or converting TTS output locally. Native owns decoding, duration and SILK.
@@ -549,20 +526,32 @@ async def load_outgoing_voice(record) -> tuple[bytes, str]:
 
 async def _load_outgoing_media(source, *, kind: str) -> tuple[bytes, str]:
     """Resolve standard media references with bounded local and public URL reads."""
-    max_bytes = MAX_VOICE_BYTES if kind == "voice" else MAX_IMAGE_BYTES
-    label = "语音" if kind == "voice" else "图片"
+    max_bytes = {
+        "voice": MAX_VOICE_BYTES,
+        "image": MAX_IMAGE_BYTES,
+        "video": VIDEO_PROTOCOL_MAX_BYTES,
+    }[kind]
+    label = {"voice": "语音", "image": "图片", "video": "视频"}[kind]
     if not isinstance(source, str) or not source:
         raise ValueError(f"{label}来源为空")
     try:
         if source.lower().startswith(("http:", "https:")):
-            data = await _download_public_media(source, max_bytes=max_bytes)
+            data = (
+                await _download_public_media(
+                    source, max_bytes=max_bytes, read_budget=VIDEO_DOWNLOAD_TIMEOUT
+                )
+                if kind == "video"
+                else await _download_public_media(source, max_bytes=max_bytes)
+            )
         elif source.startswith(("base64://", "data:")):
             if source.startswith("data:"):
                 header, separator, encoded = source.partition(",")
                 if (
                     not separator
                     or not header.lower().startswith(
-                        "data:audio/" if kind == "voice" else "data:image/"
+                        {"voice": "data:audio/", "video": "data:video/", "image": "data:image/"}[
+                            kind
+                        ]
                     )
                     or not header.lower().endswith(";base64")
                 ):
@@ -590,7 +579,11 @@ async def _load_outgoing_media(source, *, kind: str) -> tuple[bytes, str]:
                 data = await asyncio.to_thread(_read_media_file, path, max_bytes)
             else:
                 data = _decode_media_base64(source, max_bytes=max_bytes)
-        content_type = validate_voice_bytes(data) if kind == "voice" else validate_image_bytes(data)
+        content_type = {
+            "voice": validate_voice_bytes,
+            "video": validate_video_bytes,
+            "image": validate_image_bytes,
+        }[kind](data)
         return bytes(data), content_type
     except MediaError as error:
         raise ValueError(f"发送{label}校验失败：{error.reason}") from None
@@ -612,18 +605,20 @@ def _read_media_file(path: Path, max_bytes: int) -> bytes:
         return stream.read(max_bytes + 1)
 
 
-async def _download_public_media(url: str, *, max_bytes: int) -> bytes:
+async def _download_public_media(url: str, *, max_bytes: int, read_budget: float = 15) -> bytes:
     resolver = _PublicMediaResolver()
     try:
         async with (
             aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False),
-                timeout=aiohttp.ClientTimeout(total=15, connect=5, sock_read=5),
+                timeout=aiohttp.ClientTimeout(
+                    total=read_budget, connect=5, sock_read=min(read_budget, 30)
+                ),
                 trust_env=False,
                 cookie_jar=aiohttp.DummyCookieJar(),
                 auto_decompress=False,
             ) as session,
-            asyncio.timeout(15),
+            asyncio.timeout(read_budget),
         ):
             for redirects in range(4):
                 parsed = urlsplit(url)
@@ -679,6 +674,8 @@ class NativeClient:
         poll_interval: float = 0.25,
         idle_timeout: float = 45,
         voice_send_timeout: float = VOICE_SEND_TIMEOUT,
+        video_send_timeout: float = VIDEO_SEND_TIMEOUT,
+        video_timeout: float = VIDEO_DOWNLOAD_TIMEOUT,
     ):
         self.api_url = api_url
         self.account_id = account_id
@@ -688,6 +685,8 @@ class NativeClient:
         self.send_timeout, self.poll_interval = send_timeout, poll_interval
         self.media_timeout = media_timeout
         self.voice_send_timeout = voice_send_timeout
+        self.video_send_timeout = video_send_timeout
+        self.video_timeout = video_timeout
         self.idle_timeout = idle_timeout
         self._session: aiohttp.ClientSession | None = None
 
@@ -773,63 +772,63 @@ class NativeClient:
     async def account(self):
         return await self._request("GET", self.prefix)
 
+    async def capabilities(self):
+        return await self._request("GET", self.prefix + "/capabilities")
+
     async def message(self, message_id: str):
         return await self._request("GET", self.prefix + "/messages/" + quote(message_id, safe=""))
-
-    async def messages(self, thread: str, *, limit: int, cursor: str = "", query: str = ""):
-        params = {"limit": str(limit)}
-        if cursor:
-            params["cursor"] = cursor
-        if query:
-            params["query"] = query
-        return await self._request(
-            "GET", self.prefix + "/threads/" + quote(thread, safe="") + "/messages", params=params
-        )
-
-    async def group(self, thread: str):
-        return await self._request("GET", self.prefix + "/groups/" + quote(thread, safe=""))
-
-    async def group_members(self, thread: str, *, limit: int, cursor: str = ""):
-        params = {"limit": str(limit)}
-        if cursor:
-            params["cursor"] = cursor
-        return await self._request(
-            "GET", self.prefix + "/groups/" + quote(thread, safe="") + "/members", params=params
-        )
-
-    async def set_my_group_name(self, thread: str, name: str, key: str):
-        return await self._request(
-            "PUT",
-            self.prefix + "/groups/" + quote(thread, safe="") + "/my-name",
-            json={"displayName": name},
-            headers={"Idempotency-Key": key},
-        )
-
-    async def rename_group(self, thread: str, name: str, key: str):
-        return await self._request(
-            "PATCH",
-            self.prefix + "/groups/" + quote(thread, safe=""),
-            json={"name": name},
-            headers={"Idempotency-Key": key},
-        )
 
     async def operation(self, operation_id: str):
         return await self._request(
             "GET", self.prefix + "/operations/" + quote(operation_id, safe="")
         )
 
-    async def recall_message(self, message_id: str, server_id: str, key: str):
+    async def login(self, key: str):
         return await self._request(
             "POST",
-            self.prefix + "/messages/" + quote(message_id, safe="") + "/recall",
-            json={"serverId": server_id},
+            self.prefix + "/auth/login",
             headers={"Idempotency-Key": key},
+            json={
+                "strategy": "qr",
+                "forceQr": True,
+                "allowQr": True,
+                "timeoutSeconds": 300,
+                "computerName": "WeChat Adapter",
+                "qrRefresh": {"mode": "auto", "maxRefreshes": 3},
+            },
         )
 
-    async def group_mutation_by_key(self, key: str):
+    async def cancel_operation(self, operation_id: str):
         return await self._request(
-            "GET", self.prefix + "/group-mutations/by-idempotency-key", params={"key": key}
+            "DELETE", self.prefix + "/operations/" + quote(operation_id, safe="")
         )
+
+    async def logout(self, key: str):
+        return await self._request(
+            "POST", self.prefix + "/logout", headers={"Idempotency-Key": key}
+        )
+
+    async def login_qr(self, operation_id: str, generation: int) -> bytes:
+        path = self.prefix + "/operations/" + quote(operation_id, safe="") + "/qr"
+        try:
+            async with self._session.get(
+                self.api_url + path,
+                params={"generation": str(generation)},
+                allow_redirects=False,
+            ) as response:
+                await self._raise_for_status(response)
+                data = bytearray()
+                async for chunk in response.content.iter_chunked(16384):
+                    data.extend(chunk)
+                    if len(data) > 1024 * 1024:
+                        raise NativeAPIError(502)
+                if response.content_type != "image/png" or not data.startswith(
+                    b"\x89PNG\r\n\x1a\n"
+                ):
+                    raise NativeAPIError(502)
+                return bytes(data)
+        except (aiohttp.ClientError, TimeoutError, OSError):
+            raise NativeAPIError(0, "timeout") from None
 
     async def media_assets(self, message_id: str) -> dict:
         return await self._request(
@@ -840,7 +839,7 @@ class NativeClient:
         self, message_id: str, quality: str = "original", *, asset_id: str | None = None
     ) -> dict:
         logger.debug(
-            "WeChat Native 请求媒体传输：message=%s quality=%s asset=%s",
+            "微信消息适配器 请求媒体传输：message=%s quality=%s asset=%s",
             message_id,
             quality,
             asset_id,
@@ -856,7 +855,7 @@ class NativeClient:
             )
         except NativeAPIError as error:
             logger.warning(
-                "WeChat Native 媒体传输请求失败：message=%s http_status=%s code=%s",
+                "微信消息适配器 媒体传输请求失败：message=%s http_status=%s code=%s",
                 message_id,
                 error.status,
                 error.code,
@@ -872,6 +871,7 @@ class NativeClient:
         *,
         preview: bool = False,
         max_bytes: int = MAX_IMAGE_BYTES,
+        read_budget: float | None = None,
     ) -> tuple[bytes, str]:
         if self.closed:
             raise NativeAPIError(0)
@@ -879,7 +879,10 @@ class NativeClient:
         params = {"representation": "preview"} if preview else None
         try:
             async with self._session.get(
-                self.api_url + path, params=params, allow_redirects=False
+                self.api_url + path,
+                params=params,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=read_budget or self.media_timeout),
             ) as response:
                 await self._raise_for_status(response)
                 raw_length = response.headers.get("Content-Length")
@@ -912,10 +915,13 @@ class NativeClient:
         self, message_id: str, kind: str, *, quoted: bool, guard=None
     ) -> list[dict]:
         _check_guard(guard)
-        media_label = {"file": "PDF", "voice": "语音", "image": "图片"}.get(kind, "媒体")
-        media_kind = "pdf" if kind == "file" else kind if kind in {"voice", "image"} else "image"
+        media_label = {"video": "视频", "voice": "语音", "image": "图片"}.get(kind, "媒体")
+        media_kind = kind if kind in {"voice", "image", "video"} else "image"
         logger.debug(
-            "WeChat Native 查询%s资产：message=%s quoted=%s", media_label, message_id, quoted
+            "微信消息适配器 查询%s资产：message=%s quoted=%s",
+            media_label,
+            message_id,
+            quoted,
         )
         try:
             body = await self.media_assets(message_id)
@@ -923,7 +929,7 @@ class NativeClient:
             if quoted and error.status == 409 and error.code == "media_metadata_invalid":
                 raise QuotedMediaMetadataError() from None
             logger.warning(
-                "WeChat Native %s资产查询失败：message=%s http_status=%s code=%s",
+                "微信消息适配器 %s资产查询失败：message=%s http_status=%s code=%s",
                 media_label,
                 message_id,
                 error.status,
@@ -935,10 +941,13 @@ class NativeClient:
         _check_guard(guard)
         items = body.get("items")
         if not isinstance(items, list):
-            logger.warning("WeChat Native %s资产响应格式无效：message=%s", media_label, message_id)
+            logger.warning("微信消息适配器 %s资产响应格式无效：message=%s", media_label, message_id)
             raise MediaError("unavailable", media_kind=media_kind)
         logger.debug(
-            "WeChat Native %s资产查询完成：message=%s count=%s", media_label, message_id, len(items)
+            "微信消息适配器 %s资产查询完成：message=%s count=%s",
+            media_label,
+            message_id,
+            len(items),
         )
         allowed_sources = {None, "quote"} if quoted else {None, "message"}
         matched = []
@@ -951,14 +960,14 @@ class NativeClient:
                 or not item["id"]
             ):
                 logger.warning(
-                    "WeChat Native %s资产身份不匹配：message=%s", media_label, message_id
+                    "微信消息适配器 %s资产身份不匹配：message=%s", media_label, message_id
                 )
                 raise MediaError("unavailable", media_kind=media_kind)
             if item.get("kind") != kind or item.get("source") not in allowed_sources:
                 continue
             reason = item.get("reason")
             logger.debug(
-                "WeChat Native %s资产：message=%s asset=%s variant=%s actual_variant=%s "
+                "微信消息适配器 %s资产：message=%s asset=%s variant=%s actual_variant=%s "
                 "state=%s content_type=%s bytes=%s code=%s",
                 media_label,
                 message_id,
@@ -975,7 +984,7 @@ class NativeClient:
             matched.append(item)
         if not matched:
             logger.warning(
-                "WeChat Native 未找到匹配的%s资产：message=%s quoted=%s",
+                "微信消息适配器 未找到匹配的%s资产：message=%s quoted=%s",
                 media_label,
                 message_id,
                 quoted,
@@ -1005,7 +1014,7 @@ class NativeClient:
                 except NativeAPIError as error:
                     retryable = error.status in {0, 408, 429} or 500 <= error.status < 600
                     (logger.debug if retryable else logger.warning)(
-                        "WeChat Native 媒体任务查询失败：message=%s job=%s http_status=%s code=%s",
+                        "微信消息适配器 媒体任务查询失败：message=%s job=%s http_status=%s code=%s",
                         message_id,
                         job_id,
                         error.status,
@@ -1029,13 +1038,15 @@ class NativeClient:
                 )
             ):
                 logger.warning(
-                    "WeChat Native 媒体任务身份不匹配：message=%s job=%s", message_id, job_id
+                    "微信消息适配器 媒体任务身份不匹配：message=%s job=%s",
+                    message_id,
+                    job_id,
                 )
                 raise MediaError("unavailable")
             state = current.get("state")
             if state != last_state:
                 logger.debug(
-                    "WeChat Native 媒体任务状态：message=%s job=%s state=%s",
+                    "微信消息适配器 媒体任务状态：message=%s job=%s state=%s",
                     message_id,
                     job_id,
                     state,
@@ -1058,7 +1069,7 @@ class NativeClient:
                     raise MediaError("expired")
                 code = _extract_job_error_code(current)
                 logger.warning(
-                    "WeChat Native 媒体任务失败：message=%s job=%s code=%s",
+                    "微信消息适配器 媒体任务失败：message=%s job=%s code=%s",
                     message_id,
                     job_id,
                     code if code in _SAFE_CODES else "request_failed",
@@ -1078,7 +1089,7 @@ class NativeClient:
             or str(asset.get("format", "")).lower() == "wxgf"
         )
         logger.info(
-            "WeChat Native 下载图片资产：message=%s asset=%s variant=%s preview=%s",
+            "微信消息适配器 下载图片资产：message=%s asset=%s variant=%s preview=%s",
             asset.get("messageId"),
             asset["id"],
             _effective_variant(asset),
@@ -1107,7 +1118,7 @@ class NativeClient:
                 data, _ = await self.media_content(asset["id"], preview=True, max_bytes=max_bytes)
             except NativeAPIError as error:
                 logger.warning(
-                    "WeChat Native 图片预览下载失败：asset=%s http_status=%s code=%s",
+                    "微信消息适配器 图片预览下载失败：asset=%s http_status=%s code=%s",
                     asset["id"],
                     error.status,
                     error.code,
@@ -1116,7 +1127,7 @@ class NativeClient:
             _check_guard(guard)
             if isinstance(preview_len, int) and len(data) != preview_len:
                 logger.warning(
-                    "WeChat Native 图片预览长度不匹配：asset=%s expected=%s actual=%s",
+                    "微信消息适配器 图片预览长度不匹配：asset=%s expected=%s actual=%s",
                     asset["id"],
                     preview_len,
                     len(data),
@@ -1128,7 +1139,7 @@ class NativeClient:
                 and preview_sha
                 and hashlib.sha256(data).hexdigest().lower() != preview_sha.lower()
             ):
-                logger.warning("WeChat Native 图片预览散列校验失败：asset=%s", asset["id"])
+                logger.warning("微信消息适配器 图片预览散列校验失败：asset=%s", asset["id"])
                 raise MediaError("unavailable")
         else:
             byte_len = asset.get("byteLength")
@@ -1144,7 +1155,7 @@ class NativeClient:
                 data, _ = await self.media_content(asset["id"], preview=False, max_bytes=max_bytes)
             except NativeAPIError as error:
                 logger.warning(
-                    "WeChat Native 图片内容下载失败：asset=%s http_status=%s code=%s",
+                    "微信消息适配器 图片内容下载失败：asset=%s http_status=%s code=%s",
                     asset["id"],
                     error.status,
                     error.code,
@@ -1153,7 +1164,7 @@ class NativeClient:
             _check_guard(guard)
             if isinstance(byte_len, int) and len(data) != byte_len:
                 logger.warning(
-                    "WeChat Native 图片内容长度不匹配：asset=%s expected=%s actual=%s",
+                    "微信消息适配器 图片内容长度不匹配：asset=%s expected=%s actual=%s",
                     asset["id"],
                     byte_len,
                     len(data),
@@ -1165,20 +1176,20 @@ class NativeClient:
                 and sha
                 and hashlib.sha256(data).hexdigest().lower() != sha.lower()
             ):
-                logger.warning("WeChat Native 图片内容散列校验失败：asset=%s", asset["id"])
+                logger.warning("微信消息适配器 图片内容散列校验失败：asset=%s", asset["id"])
                 raise MediaError("unavailable")
         try:
             content_type = validate_image_bytes(data, max_bytes=max_bytes)
         except MediaError as error:
             logger.warning(
-                "WeChat Native 图片格式校验失败：asset=%s bytes=%s reason=%s",
+                "微信消息适配器 图片格式校验失败：asset=%s bytes=%s reason=%s",
                 asset["id"],
                 len(data),
                 error.reason,
             )
             raise
         logger.debug(
-            "WeChat Native 图片校验通过：asset=%s content_type=%s bytes=%s",
+            "微信消息适配器 图片校验通过：asset=%s content_type=%s bytes=%s",
             asset["id"],
             content_type,
             len(data),
@@ -1258,7 +1269,7 @@ class NativeClient:
                         try:
                             if isinstance(active_job_id, str) and active_job_id:
                                 logger.debug(
-                                    "WeChat Native 复用媒体任务：message=%s job=%s",
+                                    "微信消息适配器 复用媒体任务：message=%s job=%s",
                                     message_id,
                                     active_job_id,
                                 )
@@ -1316,7 +1327,7 @@ class NativeClient:
                             if error.reason in {"recalled", "missing_scope"}:
                                 raise
                             logger.warning(
-                                "WeChat Native 高清传输失败，尝试回退：message=%s reason=%s",
+                                "微信消息适配器 高清传输失败，尝试回退：message=%s reason=%s",
                                 message_id,
                                 error.reason,
                             )
@@ -1369,115 +1380,11 @@ class NativeClient:
                 raise MediaError("unavailable")
         except TimeoutError:
             logger.warning(
-                "WeChat Native 图片读取超时：message=%s timeout_seconds=%s",
+                "微信消息适配器 图片读取超时：message=%s timeout_seconds=%s",
                 message_id,
                 self.media_timeout,
             )
             raise MediaError("unavailable") from None
-
-    async def fetch_pdf(
-        self, message_id: str, *, max_bytes: int = MAX_PDF_BYTES, guard=None
-    ) -> tuple[bytes, str]:
-        """Download a validated PDF attachment as ``(bytes, filename)``; memory only."""
-        try:
-            async with asyncio.timeout(self.media_timeout):
-                return await self._fetch_pdf(message_id, max_bytes=max_bytes, guard=guard)
-        except TimeoutError:
-            logger.warning(
-                "WeChat Native PDF 读取超时：message=%s timeout_seconds=%s",
-                message_id,
-                self.media_timeout,
-            )
-            raise MediaError("unavailable", media_kind="pdf") from None
-        except MediaError as error:
-            if error.media_kind == "pdf":
-                raise
-            raise MediaError(error.reason, media_kind="pdf") from None
-
-    async def _load_pdf_assets(self, message_id: str, guard=None) -> list[dict]:
-        assets = await self._load_assets(message_id, "file", quoted=False, guard=guard)
-        pdfs = [
-            asset
-            for asset in assets
-            if _effective_variant(asset) in {"original", ""}
-            and is_pdf_filename(asset.get("filename"))
-        ]
-        if not pdfs:
-            # Native exposes the attachment's name only through its media asset.
-            raise MediaError("not_pdf", media_kind="pdf")
-        return pdfs
-
-    async def _fetch_pdf(self, message_id: str, *, max_bytes: int, guard=None) -> tuple[bytes, str]:
-        asset = (await self._load_pdf_assets(message_id, guard))[0]
-        state = asset.get("state")
-        size = asset.get("byteLength")
-        if not isinstance(size, int):
-            size = asset.get("advertisedByteLength")
-        if isinstance(size, int) and size > max_bytes:
-            raise MediaError("too_large", media_kind="pdf")
-        if state != "available":
-            if state in {"expired", "recalled", "unsupported", "unavailable", "failed"}:
-                reason = {
-                    "expired": "expired",
-                    "recalled": "recalled",
-                    "unsupported": "unsupported_format",
-                }.get(state)
-                raise MediaError(reason or "unavailable", media_kind="pdf")
-            job = asset.get("job")
-            job_id = (
-                asset.get("jobId")
-                or asset.get("activeJobId")
-                or (job.get("id") if isinstance(job, dict) else None)
-            )
-            initial = job if isinstance(job, dict) else None
-            if not isinstance(job_id, str) or not job_id:
-                _check_guard(guard)
-                try:
-                    initial = await self.transfer_media(message_id, "original")
-                except NativeAPIError as error:
-                    raise _map_media_code(
-                        error.code, status=error.status, media_kind="pdf"
-                    ) from None
-                job_id = initial.get("id")
-            _check_guard(guard)
-            await self._poll_media_job(
-                job_id, message_id=message_id, initial=initial, asset_id=asset["id"], guard=guard
-            )
-            refreshed = await self._load_pdf_assets(message_id, guard)
-            asset = next((a for a in refreshed if a.get("state") == "available"), None)
-            if asset is None:
-                raise MediaError("unavailable", media_kind="pdf")
-        byte_len = asset.get("byteLength")
-        if isinstance(byte_len, int) and byte_len <= 0:
-            raise MediaError("unavailable", media_kind="pdf")
-        adv_len = asset.get("advertisedByteLength")
-        if isinstance(byte_len, int) and byte_len > max_bytes:
-            raise MediaError("too_large", media_kind="pdf")
-        if isinstance(adv_len, int) and adv_len > max_bytes:
-            raise MediaError("too_large", media_kind="pdf")
-        _check_guard(guard)
-        try:
-            data, _ = await self.media_content(asset["id"], preview=False, max_bytes=max_bytes)
-        except NativeAPIError as error:
-            logger.warning(
-                "WeChat Native PDF 内容下载失败：asset=%s http_status=%s code=%s",
-                asset["id"],
-                error.status,
-                error.code,
-            )
-            raise _map_media_code(error.code, status=error.status, media_kind="pdf") from None
-        except MediaError as error:
-            raise MediaError(error.reason, media_kind="pdf") from None
-        _check_guard(guard)
-        if isinstance(byte_len, int) and len(data) != byte_len:
-            raise MediaError("unavailable", media_kind="pdf")
-        sha = asset.get("sha256")
-        if isinstance(sha, str) and sha and hashlib.sha256(data).hexdigest().lower() != sha.lower():
-            logger.warning("WeChat Native PDF 内容散列校验失败：asset=%s", asset["id"])
-            raise MediaError("unavailable", media_kind="pdf")
-        validate_pdf_bytes(data, max_bytes=max_bytes)
-        logger.debug("WeChat Native PDF 下载完成：asset=%s bytes=%s", asset["id"], len(data))
-        return data, asset["filename"].strip()
 
     async def fetch_voice(self, message_id: str, *, guard=None) -> bytes:
         """Request Native's decoded normal WAV; never pass raw SILK to AstrBot ASR."""
@@ -1590,7 +1497,7 @@ class NativeClient:
         record_job: Callable[[str], None],
         before_send: Callable[[], Awaitable[None]],
     ) -> dict:
-        """Stage bytes, submit one image job, then read that job without resubmitting."""
+        """Send an image message; Native supplies its original, standard and thumbnail copies."""
         suffix = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}
         if validate_image_bytes(data) != content_type:
             raise ValueError("发送图片 MIME 与内容不匹配")
@@ -1604,6 +1511,64 @@ class NativeClient:
             record_job=record_job,
             before_send=before_send,
         )
+
+    async def send_video(
+        self,
+        thread: str,
+        data: bytes,
+        content_type: str,
+        key: str,
+        *,
+        record_job: Callable[[str], None],
+        before_send: Callable[[], Awaitable[None]],
+    ) -> dict:
+        if validate_video_bytes(data) != content_type:
+            raise ValueError("发送视频 MIME 与内容不匹配")
+        caps = await self.capabilities()
+        limits = caps.get("mediaSendMaxBytes")
+        limit = limits.get("video") if isinstance(limits, dict) else None
+        upload_limit = caps.get("mediaUploadMaxBytes")
+        if (
+            type(limit) is not int
+            or limit <= 0
+            or type(upload_limit) is not int
+            or upload_limit <= 0
+        ):
+            raise ValueError("Native 未提供视频发送能力，请检查服务版本和账号权限")
+        if len(data) > min(limit, upload_limit):
+            raise ValueError("视频超过 Native 服务允许的大小，未上传或发送")
+        suffix = {
+            "video/quicktime": "mov",
+            "video/3gpp": "3gp",
+            "video/3gpp2": "3g2",
+            "video/mj2": "mj2",
+        }.get(content_type, "mp4")
+        receipt = await self._send_media(
+            thread,
+            data,
+            content_type,
+            key,
+            kind="video",
+            filename="video." + suffix,
+            record_job=record_job,
+            before_send=before_send,
+        )
+        result = receipt.get("result")
+        prepared = result.get("videoPreparation") if isinstance(result, dict) else None
+        if (
+            isinstance(prepared, dict)
+            and prepared.get("sourceSha256") == hashlib.sha256(data).hexdigest()
+            and type(prepared.get("sourcePreserved")) is bool
+            and type(prepared.get("normalBytes")) is int
+            and 0 < prepared["normalBytes"] <= VIDEO_PROTOCOL_MAX_BYTES
+        ):
+            logger.info(
+                "微信消息适配器 视频画质：source_bytes=%s playback_bytes=%s source_preserved=%s",
+                len(data),
+                prepared.get("normalBytes"),
+                prepared.get("sourcePreserved") is True,
+            )
+        return receipt
 
     async def send_voice(
         self,
@@ -1655,10 +1620,13 @@ class NativeClient:
         before_send: Callable[[], Awaitable[None]],
         record_chunks=None,
     ) -> dict:
-        """Share upload, idempotent submission and job polling for images and voice."""
+        """Share upload, idempotent submission and job polling for supported media."""
         form = aiohttp.FormData()
         form.add_field("file", data, filename=filename, content_type=content_type)
-        source = await self._request("POST", self.prefix + "/uploads", data=form)
+        options = (
+            {"timeout": aiohttp.ClientTimeout(total=self.video_timeout)} if kind == "video" else {}
+        )
+        source = await self._request("POST", self.prefix + "/uploads", data=form, **options)
         if (
             not isinstance(source.get("id"), str)
             or not source["id"]
@@ -1671,7 +1639,11 @@ class NativeClient:
             {"threadId": thread, "kind": kind, "sourceId": source["id"]}, key
         )
         deadline = asyncio.get_running_loop().time() + (
-            self.voice_send_timeout if kind == "voice" else self.send_timeout
+            self.voice_send_timeout
+            if kind == "voice"
+            else self.video_send_timeout
+            if kind == "video"
+            else self.send_timeout
         )
         job_id = None
         server_id = None
@@ -1756,7 +1728,7 @@ class NativeClient:
                     if complete_voice:
                         return value
                     if (
-                        kind == "image"
+                        kind in {"image", "video"}
                         and isinstance(value.get("serverMessageId"), str)
                         and value["serverMessageId"]
                         and isinstance(ids, list)
