@@ -84,14 +84,15 @@ index 7c5b9f5..2d255ce 100644
          request
 diff --git a/packages/native-client-rust/crates/wechat-core/src/forward_send.rs b/packages/native-client-rust/crates/wechat-core/src/forward_send.rs
 new file mode 100644
-index 0000000..91e53a3
+index 0000000..628d1f1
 --- /dev/null
 +++ b/packages/native-client-rust/crates/wechat-core/src/forward_send.rs
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,285 @@
 +//! Combine-and-forward cards use the existing durable app-message send queue.
 +use anyhow::{ensure, Result};
 +use serde::{Deserialize, Serialize};
 +use ts_rs::TS;
++use wechat_protocol::media::{MediaQuality, PreparedUpload, UploadedMedia};
 +
 +#[derive(Clone, Debug, Serialize, Deserialize, TS)]
 +#[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -195,6 +196,52 @@ index 0000000..91e53a3
 +    Ok(xml)
 +}
 +
++fn hex(bytes: &[u8]) -> String {
++    bytes.iter().map(|value| format!("{value:02x}")).collect()
++}
++
++fn record_image_xml(
++    original: &[u8],
++    thumbnail: &[u8],
++    thread: &str,
++    upload: &mut dyn FnMut(&PreparedUpload) -> Result<UploadedMedia>,
++) -> Result<String> {
++    let thumb_info = wechat_media::inspect_image(thumbnail)?;
++    // RecordMsgCDNService reads BOTH objects as FULLSIZEIMAGE (filetype 1).
++    // A chat-image upload shares one file ID across qualities 1/2/3, so its
++    // type-3 thumbnail cannot be placed in a record's type-1 thumbnail slot.
++    let original_upload = PreparedUpload::prepare(
++        original, MediaQuality::Original, "image.jpg", thread,
++    )?;
++    let thumbnail_upload = PreparedUpload::prepare(
++        thumbnail, MediaQuality::Original, "thumb.jpg", thread,
++    )?;
++    let image = upload(&original_upload)?;
++    let thumb = upload(&thumbnail_upload)?;
++    let mut xml = tag("datadesc", "[图片]");
++    // Record messages use these names; favorite XML's cdn_dataurl/fullsize
++    // spellings are not recognized by the record-message parser.
++    for (name, value) in [
++        ("datafmt", "jpg".to_owned()),
++        ("dataext", "jpg".to_owned()),
++        ("cdndataurl", image.descriptor.file_id.clone()),
++        ("cdndatakey", hex(&image.descriptor.aes_key)),
++        ("cdnthumburl", thumb.descriptor.file_id.clone()),
++        ("cdnthumbkey", hex(&thumb.descriptor.aes_key)),
++        ("fullmd5", image.md5.clone()),
++        ("head256md5", hex(&wechat_protocol::crypto::md5(&original[..original.len().min(256)]))),
++        ("datasize", image.plaintext_bytes.to_string()),
++        ("thumbfullmd5", thumb.md5.clone()),
++        ("thumbhead256md5", hex(&wechat_protocol::crypto::md5(&thumbnail[..thumbnail.len().min(256)]))),
++        ("thumbsize", thumb.plaintext_bytes.to_string()),
++        ("thumbwidth", thumb_info.width.to_string()),
++        ("thumbheight", thumb_info.height.to_string()),
++    ] {
++        xml.push_str(&tag(name, &value));
++    }
++    Ok(xml)
++}
++
 +impl crate::Core {
 +    pub(crate) fn forward_image_xml(
 +        &self,
@@ -203,35 +250,20 @@ index 0000000..91e53a3
 +        source_id: &str,
 +        state: &mut wechat_protocol::AccountState,
 +    ) -> Result<String> {
-+        let (source, bytes) = self.source_bytes(account, source_id)?;
-+        let (original, standard, thumbnail) = crate::media::image_variants(
++        let (_, bytes) = self.source_bytes(account, source_id)?;
++        let (original, _, thumbnail) = crate::media::image_variants(
 +            &bytes, None, None, crate::media::ImageVariantSizing::PreserveOriginal,
 +        )?;
-+        let material = uuid::Uuid::new_v4();
-+        let prepared = wechat_protocol::media::PreparedImageUpload::with_material(
-+            &original, &standard, &thumbnail, &source.name, thread, material.as_bytes(),
-+            &uuid::Uuid::new_v4().simple().to_string(),
-+        )?;
 +        let transport = self.upstream.media_transport_route(state, None)?;
-+        let image = transport.upload_image(&prepared, &|_, _| {
++        let progress = |_, _| {
 +            ensure!(!self.stopping.load(std::sync::atomic::Ordering::SeqCst)
 +                && self.store.runtime(account, "desired")?.as_deref() == Some(b"connected"),
 +                "forward_cancelled");
 +            Ok(())
-+        })?;
-+        let mut xml = tag("datadesc", "[图片]");
-+        for (prefix, uploaded) in [("data", &image.original), ("thumb", &image.thumbnail)] {
-+            let key: String = uploaded.descriptor.aes_key.iter().map(|v| format!("{v:02x}")).collect();
-+            xml.push_str(&tag(&format!("cdn_{prefix}url"), &uploaded.descriptor.file_id));
-+            xml.push_str(&tag(&format!("cdn_{prefix}key"), &key));
-+        }
-+        for (name, value) in [
-+            ("fullmd5", image.original.md5.clone()),
-+            ("fullsize", image.original.plaintext_bytes.to_string()),
-+            ("thumbfullmd5", image.thumbnail.md5.clone()),
-+            ("thumbfullsize", image.thumbnail.plaintext_bytes.to_string()),
-+        ] { xml.push_str(&tag(name, &value)); }
-+        Ok(xml)
++        };
++        record_image_xml(&original, &thumbnail, thread, &mut |prepared| {
++            transport.upload(prepared, &progress)
++        })
 +    }
 +}
 +
@@ -256,16 +288,83 @@ index 0000000..91e53a3
 +        assert!(record.descendants().any(|n| n.has_tag_name("recordxml")));
 +    }
 +    #[test]
-+    fn image_nodes_use_an_uploaded_descriptor_inside_the_card() {
++    fn record_images_and_thumbnails_are_independently_readable_as_fullsize_images() {
++        use wechat_protocol::media::MediaDescriptor;
++        let mut source = Vec::new();
++        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut source, 95)
++            .encode_image(&image::DynamicImage::new_rgb8(320, 240)).unwrap();
++        let (original, _, thumbnail) = crate::media::image_variants(
++            &source, None, None, crate::media::ImageVariantSizing::PreserveOriginal,
++        ).unwrap();
++        assert_eq!(source, original);
++        assert_ne!(original, thumbnail);
 +        let mut item = node("caption");
 +        item.content.push(ForwardPart::Image { source_id: "source".into() });
-+        let mut seen = Vec::new();
++        let mut uploads = Vec::new();
 +        let result = xml("self", &[item], &mut |source| {
-+            seen.push(source.to_owned());
-+            Ok(tag("cdn_dataurl", "uploaded-file"))
++            assert_eq!(source, "source");
++            record_image_xml(&original, &thumbnail, "recipient", &mut |prepared| {
++                assert_eq!(prepared.kind.filetype(), 1);
++                assert_eq!(prepared.destination, "recipient");
++                uploads.push(prepared.clone());
++                Ok(UploadedMedia {
++                    descriptor: MediaDescriptor {
++                        file_id: format!("uploaded-{}", uploads.len()),
++                        aes_key: prepared.aes_key.clone(),
++                        quality: prepared.kind,
++                        expected_bytes: Some(u64::from(prepared.plaintext_bytes)),
++                        expected_md5: Some(prepared.md5.clone()), strict_size: true,
++                        expires_at: None,
++                    },
++                    plaintext_bytes: prepared.plaintext_bytes,
++                    md5: prepared.md5.clone(), sha256: prepared.sha256.clone(),
++                    file_name: prepared.file_name.clone(), width: None, height: None,
++                })
++            })
 +        }).unwrap();
-+        assert_eq!(seen, ["source"]);
-+        assert!(result.contains("uploaded-file"));
++        assert_eq!(uploads.len(), 2);
++        assert_ne!(uploads[0].file_key, uploads[1].file_key);
++        assert_ne!(uploads[0].aes_key, uploads[1].aes_key);
++        let wrapped = format!("<msg>{result}</msg>");
++        let outer = roxmltree::Document::parse(&wrapped).unwrap();
++        let record = outer.descendants().find(|n| n.has_tag_name("recorditem")).unwrap().text().unwrap();
++        let record = roxmltree::Document::parse(record).unwrap();
++        let item = record.descendants().find(|n| n.attribute("datatype") == Some("2")).unwrap();
++        let value = |name| item.children().find(|n| n.has_tag_name(name)).unwrap().text().unwrap().to_owned();
++        // Emulate the record reader: exact record field names, filetype 1 for
++        // both objects, then decryption, declared size and digest validation.
++        for (index, prefix, size, digest, head, expected) in [
++            (0, "data", "datasize", "fullmd5", "head256md5", &original),
++            (1, "thumb", "thumbsize", "thumbfullmd5", "thumbhead256md5", &thumbnail),
++        ] {
++            assert_eq!(value(&format!("cdn{prefix}url")), format!("uploaded-{}", index + 1));
++            let encoded_key = value(&format!("cdn{prefix}key"));
++            let key: Vec<u8> = (0..encoded_key.len()).step_by(2)
++                .map(|i| u8::from_str_radix(&encoded_key[i..i + 2], 16).unwrap()).collect();
++            let raw = openssl::symm::decrypt(openssl::symm::Cipher::aes_128_ecb(),
++                &key, None, &uploads[index].encrypted).unwrap();
++            assert_eq!(&raw, expected);
++            assert_eq!(value(size).parse::<usize>().unwrap(), raw.len());
++            assert_eq!(value(digest), hex(&wechat_protocol::crypto::md5(&raw)));
++            assert_eq!(value(head), hex(&wechat_protocol::crypto::md5(&raw[..256])));
++        }
++        assert_eq!(value("thumbwidth"), "160");
++        assert_eq!(value("thumbheight"), "120");
++        assert!(!record.descendants().any(|n| n.has_tag_name("cdn_dataurl")
++            || n.has_tag_name("fullsize") || n.has_tag_name("thumbfullsize")));
++    }
++    #[test]
++    fn failed_record_image_upload_aborts_card_preparation() {
++        let mut thumbnail = Vec::new();
++        image::codecs::jpeg::JpegEncoder::new(&mut thumbnail)
++            .encode_image(&image::DynamicImage::new_rgb8(2, 2)).unwrap();
++        let mut calls = 0;
++        let error = record_image_xml(&thumbnail, &thumbnail, "recipient", &mut |_| {
++            calls += 1;
++            anyhow::bail!("synthetic_upload_rejected")
++        }).unwrap_err();
++        assert_eq!(calls, 1);
++        assert_eq!(error.to_string(), "synthetic_upload_rejected");
 +    }
 +    #[test]
 +    fn rejects_empty_oversized_and_control_character_nodes() {
