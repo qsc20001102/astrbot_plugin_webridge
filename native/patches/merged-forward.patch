@@ -1,3 +1,15 @@
+diff --git a/packages/native-client-rust/Cargo.lock b/packages/native-client-rust/Cargo.lock
+index 2f2ccfd..a4773ca 100644
+--- a/packages/native-client-rust/Cargo.lock
++++ b/packages/native-client-rust/Cargo.lock
+@@ -2895,6 +2895,7 @@ dependencies = [
+  "image",
+  "openssl",
+  "reqwest",
++ "roxmltree",
+  "serde",
+  "serde_json",
+  "wechat-media",
 diff --git a/packages/native-client-rust/crates/wechat-api/src/media.rs b/packages/native-client-rust/crates/wechat-api/src/media.rs
 index 7c5b9f5..2d255ce 100644
 --- a/packages/native-client-rust/crates/wechat-api/src/media.rs
@@ -342,6 +354,18 @@ index c832350..e1d36ab 100644
                  native
                      .send_share(
                          &mut state,
+diff --git a/packages/native-client-rust/crates/wechat-protocol/Cargo.toml b/packages/native-client-rust/crates/wechat-protocol/Cargo.toml
+index 4d64837..81c32d2 100644
+--- a/packages/native-client-rust/crates/wechat-protocol/Cargo.toml
++++ b/packages/native-client-rust/crates/wechat-protocol/Cargo.toml
+@@ -26,6 +26,7 @@ serde.workspace = true
+ serde_json.workspace = true
+ openssl = { version = "0.10", features = ["vendored"] }
+ flate2 = "1"
++roxmltree = "0.21"
+ base64 = "0.22"
+ hex = "0.4"
+ reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 diff --git a/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs b/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
 index 2101835..5bcbeff 100644
 --- a/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
