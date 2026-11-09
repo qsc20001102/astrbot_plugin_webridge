@@ -1,11 +1,11 @@
-# 微信消息适配器 1.0.0：安装集成版
+# 微信消息适配器 1.1.0：安装集成版
 
 本版只支持 Linux x86_64（amd64），Python 3.12+、glibc 2.36+。推荐官方 AstrBot v4.29.4 Docker 镜像。Windows、ARM64、32 位 x86、Alpine/musl 不在本版支持范围。
 
 ## 安装
 
 1. 如已使用独立 Native，先停用旧的微信机器人和旧 Native 容器，保留它们的数据卷。
-2. 解压完整 Linux 发行 ZIP，把 `astrbot_plugin_webridge` 目录放到 AstrBot 的 `data/plugins/` 下。避免多套一层同名文件夹。
+2. 在插件管理中通过 `https://github.com/qsc20001102/astrbot_plugin_webridge` 安装，或压缩本插件目录安装，也可放到 AstrBot 的 `data/plugins/` 下。避免多套一层同名文件夹。
 3. 确认目录中存在 `bin/linux-x86_64/wx` 和 `native/manifest.json`；仓库和发行包均已包含引擎，从 Git 安装也无须先构建。
 4. 重启 AstrBot，刷新管理页面，进入“插件管理 → 微信消息适配器 → 可视化视图 → 微信管理”。
 5. 点击“添加微信”，填写中文或英文名称，扫描二维码，在手机微信上确认登录。

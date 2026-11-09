@@ -1,6 +1,8 @@
 """Register the transport, connection diagnostics and profile-controlled sessions."""
 
 from astrbot.api import logger
+from astrbot.api.event import filter
+from astrbot.api.message_components import Node, Nodes, Reply
 from astrbot.api.star import Context, Star
 from astrbot.core.event_bus import UNIQUE_SESSION_ID_BUILDERS
 
@@ -8,6 +10,7 @@ from .adapter import WeBridgeAdapter  # noqa: F401
 from .config import ADAPTER_ID, PLUGIN_ID
 from .connection_view import ConnectionView
 from .event import session_id
+from .forward import forward_text, limit_forward_chain, parser_settings
 from .native_ui import NativeView
 from .runtime import RuntimeUnavailable, close_runtime, get_runtime
 
@@ -42,6 +45,35 @@ class WeBridgePlugin(Star):
         ]:
             context.register_web_api(f"/{PLUGIN_ID}/native/{route}", handler, [method], description)
 
+    @filter.on_waiting_llm_request(priority=10000)
+    async def prepare_forward_content(self, event):
+        if event.get_platform_name() != ADAPTER_ID:
+            return
+        components = event.get_messages()
+        if not any(
+            isinstance(part, (Node, Nodes))
+            or (
+                isinstance(part, Reply)
+                and any(isinstance(item, (Node, Nodes)) for item in part.chain or [])
+            )
+            for part in components
+        ):
+            return
+        settings = parser_settings(self.context.get_config(event.unified_msg_origin))
+        event.message_obj.message = limit_forward_chain(components, settings)
+
+    @filter.on_llm_request()
+    async def attach_forward_content(self, event, request):
+        if event.get_platform_name() != ADAPTER_ID:
+            return
+        nodes = [part for part in event.get_messages() if isinstance(part, (Node, Nodes))]
+        if not nodes:
+            return
+        settings = parser_settings(self.context.get_config(event.unified_msg_origin))
+        text = forward_text(limit_forward_chain(nodes, settings), settings)
+        if text:
+            request.prompt = (request.prompt or "") + "\n" + text
+
     async def initialize(self):
         # v4.29.4 has no public registration helper for custom session builders.
         # Use its existing registry without changing EventBus or default settings.
@@ -67,8 +99,8 @@ class WeBridgePlugin(Star):
                     if current is None or type(current) is not WeBridgeAdapter:
                         await manager.reload(saved)
         logger.info(
-            "微信消息适配器 已加载集成版：内置 Native，图片消息，视频发送，收到视频忽略；"
-            "构建 integrated-20261108-video-policy"
+            "微信消息适配器 已加载集成版：内置 Native，图片与聊天记录收发，视频发送，收到视频忽略；"
+            "构建 integrated-20261109-forward"
         )
 
     async def terminate(self):

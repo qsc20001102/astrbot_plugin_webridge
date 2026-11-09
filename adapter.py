@@ -8,7 +8,7 @@ import weakref
 from pathlib import Path
 
 from astrbot.api import logger
-from astrbot.api.message_components import Record, Video
+from astrbot.api.message_components import Nodes, Record, Video
 from astrbot.api.platform import (
     AstrBotMessage,
     Platform,
@@ -135,6 +135,8 @@ class WeBridgeAdapter(Platform):
             return "media"
         if msg_type == 49 and raw.get("appMessageType") == 57:
             return "text" if isinstance(raw.get("body"), str) or raw.get("quote") else "ignore"
+        if msg_type == 49 and raw.get("appMessageType") == 19:
+            return "text"
         if msg_type == 1 and isinstance(raw.get("body"), str) and raw["body"].strip():
             return "text"
         return "ignore"
@@ -677,7 +679,14 @@ class WeBridgeAdapter(Platform):
                 for index, part in enumerate(parts):
                     # Resolve each image with bounded memory, before recording an intent.
                     # No later component is attempted after a failure or unknown outcome.
-                    if not isinstance(part, str):
+                    if isinstance(part, Nodes):
+                        try:
+                            forward_nodes = await self.client.prepare_forward(part.nodes)
+                        except BaseException:
+                            if index and source and not self._state_closed:
+                                self.state.mark_message(message_id, "partial")
+                            raise
+                    elif not isinstance(part, str):
                         loader = (
                             load_outgoing_voice
                             if isinstance(part, Record)
@@ -687,7 +696,12 @@ class WeBridgeAdapter(Platform):
                                 else load_outgoing_image
                             )
                         )
-                        data, content_type = await loader(part)
+                        try:
+                            data, content_type = await loader(part)
+                        except BaseException:
+                            if index and source and not self._state_closed:
+                                self.state.mark_message(message_id, "partial")
+                            raise
                     key = "astrbot-" + uuid.uuid4().hex
                     self.state.begin_send(key, message_id, thread)
 
@@ -707,6 +721,13 @@ class WeBridgeAdapter(Platform):
                                 thread, part, key, mentions, quote=quote
                             )
                             mentions, quote = None, None
+                        elif isinstance(part, Nodes):
+                            receipt = await self.client.send_forward(
+                                thread,
+                                forward_nodes,
+                                key,
+                                record_send=lambda send_id: self.state.record_send_id(key, send_id),
+                            )
                         elif isinstance(part, Record):
                             receipt = await self.client.send_voice(
                                 thread,

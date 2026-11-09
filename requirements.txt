@@ -1,1 +1,2 @@
 aiohttp>=3.11.18,<4
+defusedxml>=0.7.1,<1

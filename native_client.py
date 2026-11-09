@@ -12,7 +12,7 @@ import socket
 import wave
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit
 from urllib.request import url2pathname
 from uuid import UUID
 
@@ -480,13 +480,15 @@ class _PublicMediaResolver(aiohttp.abc.AbstractResolver):
 
     def __init__(self):
         self.resolver = aiohttp.resolver.DefaultResolver()
+        self.trusted_renderer_host = None
 
     async def resolve(self, host, port=0, family=socket.AF_INET):
         results = await self.resolver.resolve(host, port, family)
         if not results:
             raise ValueError("媒体 URL 无可用公网地址")
-        for result in results:
-            _public_media_address(result["host"])
+        if host != self.trusted_renderer_host:
+            for result in results:
+                _public_media_address(result["host"])
         return results
 
     async def close(self):
@@ -610,7 +612,9 @@ async def _download_public_media(url: str, *, max_bytes: int, read_budget: float
     try:
         async with (
             aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False),
+                connector=aiohttp.TCPConnector(
+                    resolver=resolver, use_dns_cache=False, force_close=True
+                ),
                 timeout=aiohttp.ClientTimeout(
                     total=read_budget, connect=5, sock_read=min(read_budget, 30)
                 ),
@@ -627,17 +631,23 @@ async def _download_public_media(url: str, *, max_bytes: int, read_budget: float
                     or not parsed.hostname
                     or parsed.username is not None
                     or parsed.password is not None
-                    or parsed.port not in {None, 80, 443}
+                    or (parsed.port is not None and not 1 <= parsed.port <= 65535)
                     or "\\" in url
                     or any(ord(char) < 33 or ord(char) == 127 for char in url)
                 ):
                     raise ValueError("媒体 URL 协议、端口或格式不允许")
+                # AstrBot's renderer pool can use custom ports, Docker DNS or a
+                # local service. Only its configured endpoint path is trusted;
+                # re-evaluate every redirect without carrying credentials.
+                trusted = _is_renderer_media_url(url)
+                resolver.trusted_renderer_host = parsed.hostname if trusted else None
                 try:
                     ipaddress.ip_address(parsed.hostname)
                 except ValueError:
                     pass  # Hostnames are checked by the connector's resolver.
                 else:
-                    _public_media_address(parsed.hostname)
+                    if not trusted:
+                        _public_media_address(parsed.hostname)
                 async with session.get(url, allow_redirects=False) as response:
                     if response.status in {301, 302, 303, 307, 308}:
                         location = response.headers.get("Location")
@@ -659,6 +669,26 @@ async def _download_public_media(url: str, *, max_bytes: int, read_budget: float
                     return bytes(data)
     finally:
         await resolver.close()
+
+
+def _is_renderer_media_url(url: str) -> bool:
+    from astrbot.core import html_renderer
+
+    strategy = html_renderer.network_strategy
+    target = urlsplit(url)
+    for endpoint in [strategy.BASE_RENDER_URL, *strategy.endpoints]:
+        if not isinstance(endpoint, str):
+            continue
+        base = urlsplit(endpoint)
+        if (
+            target.scheme == base.scheme
+            and target.hostname == base.hostname
+            and target.port == base.port
+            and target.path.startswith(base.path.rstrip("/") + "/")
+            and all(segment not in {".", ".."} for segment in unquote(target.path).split("/"))
+        ):
+            return True
+    return False
 
 
 class NativeClient:
@@ -1854,7 +1884,45 @@ class NativeClient:
         if quote is not None:
             payload["quote"] = quote
         value = await self._submit_send(payload, key)
-        deadline = asyncio.get_running_loop().time() + self.send_timeout
+        return await self._wait_app_send(value, thread, key)
+
+    async def prepare_forward(self, nodes):
+        from .forward import prepare_forward_nodes
+
+        async def upload(image):
+            data, content_type = await load_outgoing_image(image)
+            form = aiohttp.FormData()
+            suffix = {
+                "image/jpeg": "jpg",
+                "image/png": "png",
+                "image/gif": "gif",
+                "image/webp": "webp",
+            }
+            form.add_field(
+                "file", data, filename="image." + suffix[content_type], content_type=content_type
+            )
+            source = await self._request("POST", self.prefix + "/uploads", data=form)
+            if (
+                not isinstance(source.get("id"), str)
+                or not source["id"]
+                or source.get("byteLength") != len(data)
+                or source.get("sha256") != hashlib.sha256(data).hexdigest()
+            ):
+                raise ValueError("合并转发图片上传校验失败，未提交发送")
+            return source["id"]
+
+        return await prepare_forward_nodes(nodes, upload)
+
+    async def send_forward(self, thread, nodes, key, *, record_send):
+        value = await self._submit_send(
+            {"threadId": thread, "kind": "forward", "nodes": nodes}, key
+        )
+        return await self._wait_app_send(
+            value, thread, key, record_send=record_send, read_budget=300
+        )
+
+    async def _wait_app_send(self, value, thread, key, *, record_send=None, read_budget=None):
+        deadline = asyncio.get_running_loop().time() + (read_budget or self.send_timeout)
         send_id = None
         poll_failed = False
         while True:
@@ -1867,6 +1935,8 @@ class NativeClient:
             ):
                 raise SendError("receipt_identity_mismatch", key, send_id)
             send_id = value["id"]
+            if record_send is not None:
+                record_send(send_id)
             state = value.get("state")
             if state == "accepted":
                 return value  # Server acceptance, not proof of recipient delivery.

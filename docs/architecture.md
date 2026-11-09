@@ -20,6 +20,7 @@ AstrBot 插件页面 → 微信账号 API → 插件管理的 Native 进程 → 
 | `config.py` | 平台通用字段与账号 ID，以及传输大小和超时限制 |
 | `adapter.py` | 账号连接、live 消息身份与去重、接收队列、媒体下载、发送幂等和回执 |
 | `event.py` | 标准组件转换、来源与会话 ID、回复发送 |
+| `forward.py` | 微信聊天记录 XML 与 Node/Nodes 转换，复用官方解析设置与解析器 |
 | `native_client.py` | 复用 Native `/v1`，核对身份、长度、SHA-256、格式及外部 URL |
 | `state.py` | 微信消息适配器独立目录中的游标、去重、撤回、发送回执 |
 | `connection_view.py`、`views/connection/` | 只读连接诊断 |
@@ -45,4 +46,8 @@ EventBus 先按共享来源选择配置，再通过 `UNIQUE_SESSION_ID_BUILDERS`
 
 输出图片继续使用 `kind: image`。插件上传源字节；内置引擎保留 JPEG 原字节，PNG 等转完整尺寸 JPEG。original 支持分块，standard/thumbnail 仍为小型预览。旧任务的准备模式保留，不改变旧回执对应的媒体。具体实现见 Native 补丁及合成图回归测试。
 
-输出视频复用 Native job，兼容源保留字节，其他来源仅做编码兼容处理，不按大小、分辨率或帧率预算压缩；语音沿用现有准备流程，保留幂等、撤回检查和不确定结果。转发节点只展开标准内容，不模拟 QQ 专有 API。PDF 已移除，普通文件尚未实现。
+输出视频复用 Native job，兼容源保留字节，其他来源仅做编码兼容处理，不按大小、分辨率或帧率预算压缩；语音沿用现有准备流程，保留幂等、撤回检查和不确定结果。PDF 已移除，普通文件尚未实现。
+
+合并转发转换为标准 Node/Nodes。接收时保留内嵌 XML 对应的节点结构；仅在框架已决定请求模型后，按该会话配置的 `provider_settings.quoted_message_parser` 限制递归，并复用官方解析器提供消息文本。引用记录交给官方 Reply 解析路径；不将记录内的命令和 @ 当作本条消息的唤醒信号。媒体保留类型占位符，暂不下载记录内的 CDN 附件。
+
+发送时将相邻 Node 合成一张卡片，通过 Native 新增的 `kind: forward` 分支生成 subtype 19 聊天记录。该分支复用现有持久化 app-message 发送队列、幂等键、服务回执和状态查询；图片先暂存并沿用原图上传，再把 CDN 描述符写入记录。文本、图片和嵌套节点保留在同一张卡片；不支持的组件在任何发送前拒绝。

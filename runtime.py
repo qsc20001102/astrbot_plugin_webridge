@@ -50,6 +50,8 @@ def verify_executable(root: Path = ROOT) -> tuple[Path, dict]:
             or manifest.get("video_passthrough") is not True
             or manifest.get("video_size_policy") != "protocol_only"
             or manifest.get("incoming_video_download") is not False
+            or manifest.get("merged_forward") is not True
+            or manifest.get("forward_projection") != "xml-v1"
             or binary.is_symlink()
             or not binary.is_file()
         ):

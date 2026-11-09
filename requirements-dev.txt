@@ -1,9 +1,0 @@
--r requirements.txt
-# Exact official source revision for the supported AstrBot release.
-astrbot @ git+https://github.com/AstrBotDevs/AstrBot.git@61335414433db721b3f7ecc93f90deafe0a59d78
-pytest>=8.4,<10
-pytest-asyncio>=1.1,<2
-pytest-cov>=6,<8
-# Keep CI formatting stable, including the existing Markdown code examples.
-ruff==0.15.7
-playwright>=1.56,<2

@@ -20,6 +20,8 @@ from astrbot.api.message_components import (
 )
 from astrbot.api.platform import AstrBotMessage, Group, MessageMember, MessageType
 
+from .forward import parse_forward_xml, validate_forward_nodes
+
 
 def message_timestamp(raw: dict) -> int | None:
     value = raw.get("createdAt")
@@ -108,6 +110,14 @@ def convert_message(
         text = re.sub(r"^(?:@[^\u2005\r\n]+\u2005[ \t]*)+", "", text)
     result.message_str = text
     result.message = mention_components
+    is_forward = raw.get("type") == 49 and raw.get("appMessageType") == 19
+    if is_forward:
+        text = "[聊天记录]"
+        result.message_str = text
+        try:
+            result.message.append(parse_forward_xml(raw.get("forwardXml")))
+        except ValueError:
+            result.message.append(Nodes([Node(content=[Plain("[聊天记录内容不可用]")])]))
     quote = raw.get("quote")
     if raw.get("type") == 49 and raw.get("appMessageType") == 57 and isinstance(quote, dict):
         state = quote.get("state")
@@ -131,15 +141,23 @@ def convert_message(
             quoted_text = "不支持此引用消息的内容"
         elif state == "embedded" and isinstance(quote.get("embeddedText"), str):
             quoted_text = quote["embeddedText"][:16384] or quoted_text
+        quote_chain = [Plain(quoted_text)]
+        if quote.get("embeddedForwardXml") and state != "recalled":
+            try:
+                quote_chain = [parse_forward_xml(quote["embeddedForwardXml"])]
+                quoted_text = "[聊天记录]"
+            except ValueError:
+                quote_chain = [Plain("[聊天记录内容不可用]")]
+                quoted_text = "[聊天记录内容不可用]"
         result.message.append(
             Reply(
                 id=quote.get("serverId") if isinstance(quote.get("serverId"), str) else "",
                 sender_id=quote.get("senderId") if isinstance(quote.get("senderId"), str) else "",
                 message_str=quoted_text,
-                chain=[Plain(quoted_text)],
+                chain=quote_chain,
             )
         )
-    if text or (image_bytes is None and voice_bytes is None):
+    if not is_forward and (text or (image_bytes is None and voice_bytes is None)):
         result.message.append(Plain(text))
     if image_bytes is not None:
         result.message.append(Image.fromBytes(image_bytes))
@@ -152,7 +170,7 @@ def convert_message(
 
 def serialize_chain(
     chain: MessageChain, *, group: bool
-) -> tuple[list[str | Image | Record | Video], dict | None, str | None]:
+) -> tuple[list[str | Image | Record | Video | Nodes], dict | None, str | None]:
     """Keep media between contiguous text runs; metadata belongs to the first text run."""
     parts, text, users, all_members = [], [], [], False
     reply_id = None
@@ -163,26 +181,18 @@ def serialize_chain(
             parts.append(value)
         text.clear()
 
-    def expand(components, depth=0):
-        # Native has no QQ merged-forward interface. Send the standard node
-        # contents in order, with a text boundary between separate nodes.
-        if depth > 8:
-            raise ValueError("转发消息嵌套过深")
-        for component in components:
-            if isinstance(component, Nodes):
-                yield from expand(component.nodes, depth + 1)
-            elif isinstance(component, Node):
-                yield None
-                yield from expand(component.content, depth + 1)
-                yield None
-            else:
-                yield component
-
-    for index, component in enumerate(expand(chain.chain)):
+    for index, component in enumerate(chain.chain):
         if index >= 1024:
             raise ValueError("消息链组件过多")
-        if component is None:
+        if isinstance(component, (Node, Nodes)):
             flush_text()
+            nodes = component.nodes if isinstance(component, Nodes) else [component]
+            validate_forward_nodes(nodes)
+            if parts and isinstance(parts[-1], Nodes):
+                parts[-1].nodes.extend(nodes)
+                validate_forward_nodes(parts[-1].nodes)
+            else:
+                parts.append(Nodes(list(nodes)))
             continue
         if isinstance(component, Plain):
             text.append(component.text)
@@ -266,10 +276,19 @@ class WeBridgeEvent(AstrMessageEvent):
                 event=self,
             )
         except (Exception, asyncio.CancelledError) as error:
-            # Includes validation/readback failures before an outbox entry exists.
-            if not self.adapter._state_closed:
+            # send_chain records every submitted/uncertain intent. A local
+            # validation or download failure before submission can safely be
+            # followed by the calling plugin's text fallback.
+            if not self.adapter._state_closed and (
+                not isinstance(error, ValueError) or status == "replied"
+            ):
                 current = self.adapter.state.message_status(self.message_obj.message_id)
-                if current not in {"failed", "needs_review", "partial", "recalled"}:
+                if current not in {
+                    "failed",
+                    "needs_review",
+                    "partial",
+                    "recalled",
+                }:
                     self.adapter.state.mark_message(
                         self.message_obj.message_id,
                         "failed" if isinstance(error, ValueError) else "needs_review",

@@ -4,11 +4,13 @@
 
 微信消息适配器将个人微信接入 AstrBot，内置 Native 引擎，在插件界面扫码登录并一键创建消息平台。只负责消息收发，唤醒、白名单、模型和业务插件使用 AstrBot 配置。
 
-**版本 1.0.0 · AstrBot v4.29.4 · Linux x86_64（amd64）· Python 3.12+ · glibc 2.36+**。已在官方 `soulter/astrbot:v4.29.4` 镜像验证引擎运行。
+**版本 1.1.0 · AstrBot v4.29.4 · Linux x86_64（amd64）· Python 3.12+ · glibc 2.36+**。
+
+独立维护仓库：[qsc20001102/astrbot_plugin_webridge](https://github.com/qsc20001102/astrbot_plugin_webridge)。仓库自带运行所需引擎，可以直接安装仓库或压缩本目录安装。
 
 ## 安装与登录
 
-1. 将完整的 Linux x86_64 发行包解压到 `data/plugins/astrbot_plugin_webridge`，目录下直接包含 `main.py`、`metadata.yaml` 和 `bin/linux-x86_64/wx`。
+1. 在 AstrBot 插件管理中填写本仓库地址安装；也可以将本目录压缩安装，或放到 `data/plugins/astrbot_plugin_webridge`。目录下直接包含 `main.py`、`metadata.yaml` 和 `bin/linux-x86_64/wx`。
 2. 重启 AstrBot，打开“插件管理 → 微信消息适配器 → 可视化视图 → 微信管理”。
 3. 点击“添加微信”，输入账号名称，用手机微信扫码并确认。
 4. 登录成功后点击“一键接入 AstrBot”。插件自动创建、启用微信消息适配器消息平台，无须填写服务地址、Token 或文件路径。
@@ -58,12 +60,21 @@ Docker 部署建议在 Linux 使用 `network_mode: host`，有些手机确认需
 
 - 接收和发送标准文本、图片、语音，以及文本携带的真实 @、@全体和引用；支持视频发送，收到视频直接忽略。
 - 支持普通回复、`event.send` 和按保存会话主动发送。指令和参数交给框架或业务插件解析。
-- `Node` / `Nodes` 中的内容按顺序发送为微信消息，不伪造 QQ 合并转发的作者身份。
+- 标准 `Node` / `Nodes` 发送为微信“聊天记录”合并转发卡片，支持文本、图片和嵌套节点，保留署名与时间。卡片中的 @ 仅显示为文字。
+- 接收微信合并转发及其引用，保留节点文字、署名、时间与嵌套结构。内嵌图片、语音、视频、文件等目前保留类型占位符，不自动下载。发送卡片暂不支持内嵌语音、视频、文件；遇到这些组件会在发送前报错，不拆开发送或静默丢失。
 - 图片单张最多 10 MiB；语音来源最多 26,214,383 字节、总长 300 秒。Native 负责音视频准备，视频仍受账号能力限制。
 - 保留 SSE 游标、断线重连、持久化去重、撤回保护、发送幂等、异步 job 和分段语音回执；不确定结果不自动重发。
 - PDF 功能已移除，普通文件收发尚未实现。纯媒体携带 @ / 引用受 Native 限制，需要非空文本承载。
 
 依赖 QQ 专有 API 或硬编码平台类型的插件，仍需对应插件适配。
+
+## 渲染图片与聊天记录
+
+兼容 AstrBot `event.image_result()`、本地文件、base64 和 HTTP(S) 图片。渲染服务可以使用自定义端口；内网渲染服务须配置在 AstrBot 的 `t2i_endpoint` 中。读取失败且尚未提交任何回复时，业务插件可以发送文本降级；已发送部分内容或回执不确定时仍保留防重发保护。
+
+聊天记录遵循机器人所绑定配置的 `provider_settings.quoted_message_parser`：`max_component_chain_depth` 控制组件递归深度，`max_forward_node_depth` 控制嵌套记录深度。使用 AstrBot 官方解析器提供文本；不会把记录内的指令、@ 当成本条消息的唤醒条件。`max_forward_fetch` 是官方远程拉取次数限制，本适配器使用消息内嵌记录，不额外拉取远程转发内容。
+
+业务插件按官方约定构造 `Node(name=..., uin=..., time=..., content=[Plain(...), Image(...)])` 或 `Nodes([...])` 后调用 `event.send(event.chain_result([...]))`，主动发送也使用同样的消息链。`platform_settings.forward_threshold` 属于官方 QQ 自动折叠选项，本平台不使用它自动改变回复样式。
 
 ## 数据与运行
 
@@ -73,16 +84,10 @@ Docker 部署建议在 Linux 使用 `network_mode: host`，有些手机确认需
 
 上游基于 [neozhu/astrbot-plugin-wechat-native](https://github.com/neozhu/astrbot-plugin-wechat-native) 和 [thisnick/agent-wechat v1.5.1](https://github.com/thisnick/agent-wechat/tree/v1.5.1)。仓库和发行 ZIP 均包含 Linux x86_64 引擎，可直接安装。引擎固定提交、源码补丁、重建脚本和许可见 [native](native/README.md)。
 
-## 开发验证
+## 开发与许可
 
-```bash
-python -m pip install -r requirements-dev.txt
-python -m playwright install chromium
-ruff check .
-ruff format --check .
-python -m pytest
-```
+本目录仅保留插件运行文件、使用文档、内置引擎及可重建的源码补丁。测试、开发依赖、临时文件与验证记录位于工作区的 `Test` 目录，不随插件安装。Native 的构建、Clippy 和回归测试由 `bash native/build-linux.sh` 或仓库 Actions 执行。
 
-测试直接使用锁定的官方 AstrBot v4.29.4 源码；HTTP/SSE 和扫码界面测试使用模拟账号，不需要微信凭据。Linux 实际引擎检查见 `native/smoke.py`，Native 格式、Clippy 和测试由 `bash native/build-linux.sh` 执行。
+本项目独立维护，沿用上游 MIT 许可与署名；内置引擎的各项许可和来源见 `native/licenses/` 与 `native/README.md`。
 
-[安装说明](docs/setup.md) · [架构](docs/architecture.md) · [运维](docs/operations.md) · [验证记录](docs/transport-only-verification.md) · [图标说明](docs/branding.md)
+[安装说明](docs/setup.md) · [架构](docs/architecture.md) · [运维](docs/operations.md)
