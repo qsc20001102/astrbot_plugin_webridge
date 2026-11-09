@@ -10,6 +10,65 @@ index 2f2ccfd..a4773ca 100644
   "serde",
   "serde_json",
   "wechat-media",
+diff --git a/packages/native-client-rust/crates/wechat-api/src/contracts.rs b/packages/native-client-rust/crates/wechat-api/src/contracts.rs
+index e0580cd..f60dfce 100644
+--- a/packages/native-client-rust/crates/wechat-api/src/contracts.rs
++++ b/packages/native-client-rust/crates/wechat-api/src/contracts.rs
+@@ -29,6 +29,9 @@ pub struct NativeMessage {
+     #[serde(default)]
+     #[ts(optional)]
+     pub quote: Option<NativeQuoteReference>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub forward_xml: Option<String>,
+     #[serde(default)]
+     #[ts(optional)]
+     pub link: Option<wechat_core::LinkCard>,
+@@ -78,6 +81,9 @@ pub struct NativeQuoteReference {
+     #[serde(default)]
+     #[ts(optional)]
+     pub embedded_text: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub embedded_forward_xml: Option<String>,
+     #[serde(default)]
+     #[ts(optional)]
+     pub embedded_image: Option<bool>,
+@@ -489,6 +495,8 @@ pub fn typescript() -> String {
+         wechat_core::TextMentions::decl(),
+         NativeTextSendRequest::decl(),
+         wechat_core::ShareSendRequest::decl(),
++        wechat_core::ForwardNode::decl(),
++        wechat_core::ForwardPart::decl(),
+         NativeRecallRequest::decl(),
+         NativeReadRequest::decl(),
+         NativeForgetRequest::decl(),
+@@ -627,6 +635,25 @@ mod tests {
+         .is_err());
+     }
+     #[test]
++    fn forward_contract_preserves_the_standard_node_envelope_and_rejects_empty_records() {
++        let body = serde_json::json!({"kind":"forward","threadId":"peer","nodes":[{
++            "name":"Alice", "uin":"author", "time":123,
++            "content":[{"type":"text","text":"hello"}]
++        }]});
++        let request: wechat_core::ShareSendRequest = serde_json::from_value(body.clone()).unwrap();
++        request.validate().unwrap();
++        assert_eq!(serde_json::to_value(request).unwrap(), body);
++        let empty: wechat_core::ShareSendRequest = serde_json::from_value(
++            serde_json::json!({"kind":"forward","threadId":"peer","nodes":[]})
++        ).unwrap();
++        assert!(empty.validate().is_err());
++        let generated = typescript();
++        assert!(generated.contains("forwardXml?: string"));
++        assert!(generated.contains("embeddedForwardXml?: string"));
++        assert!(generated.contains("type ForwardNode ="));
++        assert!(generated.contains("type ForwardPart ="));
++    }
++    #[test]
+     fn generated_contract_uses_lossless_strings_and_nullable_metadata() {
+         let generated = typescript();
+         assert!(generated.contains("NATIVE_MAX_SOURCE_BYTES = 536870912 as const"));
 diff --git a/packages/native-client-rust/crates/wechat-api/src/media.rs b/packages/native-client-rust/crates/wechat-api/src/media.rs
 index 7c5b9f5..2d255ce 100644
 --- a/packages/native-client-rust/crates/wechat-api/src/media.rs
@@ -216,14 +275,15 @@ index 0000000..91e53a3
 +    }
 +}
 diff --git a/packages/native-client-rust/crates/wechat-core/src/lib.rs b/packages/native-client-rust/crates/wechat-core/src/lib.rs
-index 21c7cda..182c26a 100644
+index 21c7cda..6ef232e 100644
 --- a/packages/native-client-rust/crates/wechat-core/src/lib.rs
 +++ b/packages/native-client-rust/crates/wechat-core/src/lib.rs
-@@ -6,6 +6,7 @@ pub mod call_types;
+@@ -6,6 +6,8 @@ pub mod call_types;
  pub mod calls;
  mod format;
  mod forwarded;
 +mod forward_send;
++pub use forward_send::{ForwardNode, ForwardPart};
  mod links;
  pub use links::{LinkCard, ShareSendRequest};
  mod locations;
@@ -400,3 +460,33 @@ index 2101835..6196dfd 100644
          assert_eq!(p::data(&app, 4).unwrap(), b"room@chatroom");
          assert_eq!(p::data(&app, 6).unwrap(), share_xml.as_bytes());
          assert_eq!(p::scalar(&app, 7).unwrap(), 1234567);
+diff --git a/packages/shared/src/native.generated.ts b/packages/shared/src/native.generated.ts
+index 2cb406c..0878bfb 100644
+--- a/packages/shared/src/native.generated.ts
++++ b/packages/shared/src/native.generated.ts
+@@ -26,12 +26,12 @@ export type CallAudioTrack = { id: number, generation: number, direction: CallTr
+ export type CallEvent = { "type": "hello", protocolVersion: number, clientId: string, capabilities: CallCapabilities, availability: CallsAvailability, currentOffer: CallOffer | null, currentPendingOffer: CallPendingOffer | null, currentCall: CallView | null, audioFormat: CallAudioFormat, } | { "type": "command.result", requestId: string, status: CallCommandStatus, callId: string | null, ownerToken: string | null, code: CallErrorCode | null, } | { "type": "call.offered", offer: CallOffer, } | { "type": "call.pending", offer: CallPendingOffer | null, } | { "type": "call.state", call: CallView, } | { "type": "call.control", callId: string, participantId: string, control: CallControl, } | { "type": "calls.availability", availability: CallsAvailability, } | { "type": "track.added", callId: string, track: CallAudioTrack, } | { "type": "track.updated", callId: string, track: CallAudioTrack, } | { "type": "media.ready", sendTrack: CallAudioTrack, receiveTrack: CallAudioTrack, } | { "type": "call.error", code: CallErrorCode, };
+ export type CallMediaCommand = { "type": "media.attach", clientId: string, ownerToken: string, } | { "type": "audio.start", generation: number, };
+ export type NativeMentions = { state: string, userIds: Array<string>, self: boolean | null, all: boolean | null, source: string | null, };
+-export type NativeQuoteReference = { serverId: string, type: number, state?: string, senderId?: string, direction?: string, appMessageType?: number, embeddedText?: string, embeddedImage?: boolean, embeddedLink?: LinkCard, embeddedSticker?: boolean, };
++export type NativeQuoteReference = { serverId: string, type: number, state?: string, senderId?: string, direction?: string, appMessageType?: number, embeddedText?: string, embeddedForwardXml?: string, embeddedImage?: boolean, embeddedLink?: LinkCard, embeddedSticker?: boolean, };
+ export type LinkCard = { title: string | null, description: string | null, url: string | null, sourceName: string | null, };
+ export type LocationCoordinateSystem = "unknown";
+ export type LocationCard = { latitude: number, longitude: number, name: string | null, address: string | null, scale: number | null, mapType: string | null, poiId: string | null, coordinateSystem: LocationCoordinateSystem, };
+ export type NativeRecallInfo = { observedAt: string, recalledAt?: string, replacementText?: string | null, };
+-export type NativeMessage = { id: string, accountId: string, threadId: string, serverId: string | null, senderId: string | null, type: number, appMessageType?: number, quote?: NativeQuoteReference, link?: LinkCard, location?: LocationCard, recall?: NativeRecallInfo, direction: string | null, body: string | null, createdAt: string | null, mentions: NativeMentions, version: string, media: unknown[], };
++export type NativeMessage = { id: string, accountId: string, threadId: string, serverId: string | null, senderId: string | null, type: number, appMessageType?: number, quote?: NativeQuoteReference, forwardXml?: string, link?: LinkCard, location?: LocationCard, recall?: NativeRecallInfo, direction: string | null, body: string | null, createdAt: string | null, mentions: NativeMentions, version: string, media: unknown[], };
+ export type PeerCategory = "unknown" | "system" | "group" | "business" | "openim" | "openim_customer_service";
+ export type PeerNamespace = "wechat" | "openim" | "openim_customer_service" | "im_chatroom" | "qy" | "weclaw" | "other";
+ export type PeerBusinessKind = "official_account" | "service_account" | "enterprise" | "enterprise_child" | "photo_account";
+@@ -67,7 +67,9 @@ export type QuoteSendReference = { messageId: string, serverId: string, };
+ export type TextMentionPosition = { start: number, end: number, index: number, };
+ export type TextMentions = { userIds?: Array<string>, all?: boolean, positions?: Array<TextMentionPosition>, };
+ export type NativeTextSendRequest = { threadId: string, text: string, quote?: QuoteSendReference, mentions?: TextMentions, };
+-export type ShareSendRequest = { "kind": "share", threadId: string, title: string, url: string, description?: string, thumbnailUrl?: string, };
++export type ShareSendRequest = { "kind": "share", threadId: string, title: string, url: string, description?: string, thumbnailUrl?: string, } | { "kind": "forward", threadId: string, nodes: Array<ForwardNode>, };
++export type ForwardNode = { name: string, uin: string, time: number, content: Array<ForwardPart>, };
++export type ForwardPart = { "type": "text", text: string, } | { "type": "image", sourceId: string, } | { "type": "forward", nodes: Array<ForwardNode>, };
+ export type NativeRecallRequest = { serverId: string, };
+ export type NativeReadRequest = { expectedVersion: string, };
+ export type NativeForgetRequest = { confirm: boolean, };
