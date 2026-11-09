@@ -11,7 +11,7 @@ desc: |
   不注册群摘要、历史查询或群管理工具。
   保留断线重连、持久化去重、发送幂等和回执；普通文件收发暂不支持。
   需要 Linux x86_64、glibc 2.36+，已针对 AstrBot v4.29.4 验证。
-version: 1.1.0
+version: 1.1.1
 author: qsc20001102
 category: utilities
 astrbot_version: ">=4.29.4,<5"

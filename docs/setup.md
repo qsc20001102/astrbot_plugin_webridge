@@ -1,4 +1,4 @@
-# 微信消息适配器 1.1.0：安装集成版
+# 微信消息适配器 1.1.1：安装集成版
 
 本版只支持 Linux x86_64（amd64），Python 3.12+、glibc 2.36+。推荐官方 AstrBot v4.29.4 Docker 镜像。Windows、ARM64、32 位 x86、Alpine/musl 不在本版支持范围。
 

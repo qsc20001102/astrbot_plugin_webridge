@@ -4,7 +4,7 @@
 
 微信消息适配器将个人微信接入 AstrBot，内置 Native 引擎，在插件界面扫码登录并一键创建消息平台。只负责消息收发，唤醒、白名单、模型和业务插件使用 AstrBot 配置。
 
-**版本 1.1.0 · AstrBot v4.29.4 · Linux x86_64（amd64）· Python 3.12+ · glibc 2.36+**。
+**版本 1.1.1 · AstrBot v4.29.4 · Linux x86_64（amd64）· Python 3.12+ · glibc 2.36+**。
 
 独立维护仓库：[qsc20001102/astrbot_plugin_webridge](https://github.com/qsc20001102/astrbot_plugin_webridge)。仓库自带运行所需引擎，可以直接安装仓库或压缩本目录安装。
 
@@ -73,6 +73,8 @@ Docker 部署建议在 Linux 使用 `network_mode: host`，有些手机确认需
 兼容 AstrBot `event.image_result()`、本地文件、base64 和 HTTP(S) 图片。渲染服务可以使用自定义端口；内网渲染服务须配置在 AstrBot 的 `t2i_endpoint` 中。读取失败且尚未提交任何回复时，业务插件可以发送文本降级；已发送部分内容或回执不确定时仍保留防重发保护。
 
 聊天记录遵循机器人所绑定配置的 `provider_settings.quoted_message_parser`：`max_component_chain_depth` 控制组件递归深度，`max_forward_node_depth` 控制嵌套记录深度。使用 AstrBot 官方解析器提供文本；不会把记录内的指令、@ 当成本条消息的唤醒条件。`max_forward_fetch` 是官方远程拉取次数限制，本适配器使用消息内嵌记录，不额外拉取远程转发内容。
+
+1.1.1 修正聊天记录内图片显示“已被清理”的问题：使用记录消息专用字段，正文图片与缩略图独立上传并写入匹配的密钥、大小和摘要。升级时须一并更新内置引擎并重启 AstrBot，再重新发送聊天记录；旧卡片中的错误附件信息不会自动修复。
 
 业务插件按官方约定构造 `Node(name=..., uin=..., time=..., content=[Plain(...), Image(...)])` 或 `Nodes([...])` 后调用 `event.send(event.chain_result([...]))`，主动发送也使用同样的消息链。`platform_settings.forward_threshold` 属于官方 QQ 自动折叠选项，本平台不使用它自动改变回复样式。
 

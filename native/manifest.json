@@ -3,14 +3,14 @@
   "target": "x86_64-unknown-linux-gnu",
   "upstream_commit": "39af1eec84f4763e1257406f8c5fb848b31d82e9",
   "image_original": true,
-  "sha256": "e4451a06246ab8a359341d62ef9dba6b5d357c460875dcf00827cab080899365",
+  "sha256": "f4d8265c66c5392b563fb4cc266b28b1edd187a3d8f7049aaefffbe5b8bedfee",
   "patch_sha256": "b91a01a4322245c8d22a511b1a818dd1d16cf803186d89ce64c8ddddacb8b2ea",
   "minimum_glibc": "2.36",
   "rustc": "1.93.1",
   "video_passthrough": true,
   "video_size_policy": "protocol_only",
   "incoming_video_download": false,
-  "forward_patch_sha256": "467fc438f98fb1fe49b4f963c0b5c54bcbf255b6b551239254c53e2370a06eba",
+  "forward_patch_sha256": "8a71e8be59368e609852accd07753082fdb5a679ece06c5dc31f4ed896a9322b",
   "merged_forward": true,
   "forward_projection": "xml-v1"
 }
