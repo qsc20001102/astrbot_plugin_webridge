@@ -228,18 +228,13 @@ index 21c7cda..182c26a 100644
  pub use links::{LinkCard, ShareSendRequest};
  mod locations;
 diff --git a/packages/native-client-rust/crates/wechat-core/src/links.rs b/packages/native-client-rust/crates/wechat-core/src/links.rs
-index 585415a..19eda98 100644
+index 585415a..35b2e48 100644
 --- a/packages/native-client-rust/crates/wechat-core/src/links.rs
 +++ b/packages/native-client-rust/crates/wechat-core/src/links.rs
-@@ -20,11 +20,20 @@ pub enum ShareSendRequest {
+@@ -20,11 +20,15 @@ pub enum ShareSendRequest {
          #[ts(optional)]
          thumbnail_url: Option<String>,
      },
-+    Forward {
-+        #[serde(rename = "threadId")]
-+        thread_id: String,
-+        nodes: Vec<crate::forward_send::ForwardNode>,
-+    },
 +    Forward {
 +        #[serde(rename = "threadId")]
 +        thread_id: String,
@@ -254,7 +249,7 @@ index 585415a..19eda98 100644
      }
      pub fn validate(&self) -> anyhow::Result<()> {
          let destination = self.destination();
-@@ -46,7 +55,10 @@ impl ShareSendRequest {
+@@ -46,7 +50,10 @@ impl ShareSendRequest {
              description,
              thumbnail_url,
              ..
@@ -367,7 +362,7 @@ index 4d64837..81c32d2 100644
  hex = "0.4"
  reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 diff --git a/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs b/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
-index 2101835..5bcbeff 100644
+index 2101835..6196dfd 100644
 --- a/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
 +++ b/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
 @@ -116,12 +116,20 @@ pub fn share_send_request(
@@ -392,3 +387,16 @@ index 2101835..5bcbeff 100644
          p::bytes(6, content.as_bytes()),
          p::uint(7, created_at as u64),
          p::bytes(8, client_id.as_bytes()),
+@@ -1290,6 +1298,12 @@ mod tests {
+         let outer = p::decode(&share).unwrap();
+         let app = p::decode(p::data(&outer, 2).unwrap()).unwrap();
+         assert_eq!(p::scalar(&app, 5).unwrap(), 5);
++        let forward_xml = share_xml.replace("<type>5</type>", "<type>19</type>");
++        let forward = share_send_request(&state, "peer", "forward-client", 1234567, &forward_xml).unwrap();
++        let forward_outer = p::decode(&forward).unwrap();
++        let forward_app = p::decode(p::data(&forward_outer, 2).unwrap()).unwrap();
++        assert_eq!(p::scalar(&forward_app, 5).unwrap(), 19);
++        assert_eq!(p::data(&forward_app, 6).unwrap(), forward_xml.as_bytes());
+         assert_eq!(p::data(&app, 4).unwrap(), b"room@chatroom");
+         assert_eq!(p::data(&app, 6).unwrap(), share_xml.as_bytes());
+         assert_eq!(p::scalar(&app, 7).unwrap(), 1234567);
