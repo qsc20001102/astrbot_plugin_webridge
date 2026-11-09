@@ -84,7 +84,7 @@ index 7c5b9f5..2d255ce 100644
          request
 diff --git a/packages/native-client-rust/crates/wechat-core/src/forward_send.rs b/packages/native-client-rust/crates/wechat-core/src/forward_send.rs
 new file mode 100644
-index 0000000..628d1f1
+index 0000000..aeece92
 --- /dev/null
 +++ b/packages/native-client-rust/crates/wechat-core/src/forward_send.rs
 @@ -0,0 +1,285 @@
@@ -330,7 +330,7 @@ index 0000000..628d1f1
 +        let record = outer.descendants().find(|n| n.has_tag_name("recorditem")).unwrap().text().unwrap();
 +        let record = roxmltree::Document::parse(record).unwrap();
 +        let item = record.descendants().find(|n| n.attribute("datatype") == Some("2")).unwrap();
-+        let value = |name| item.children().find(|n| n.has_tag_name(name)).unwrap().text().unwrap().to_owned();
++        let value = |name: &str| item.children().find(|n| n.has_tag_name(name)).unwrap().text().unwrap().to_owned();
 +        // Emulate the record reader: exact record field names, filetype 1 for
 +        // both objects, then decryption, declared size and digest validation.
 +        for (index, prefix, size, digest, head, expected) in [
