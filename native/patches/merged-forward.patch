@@ -204,14 +204,13 @@ index 0000000..91e53a3
 +    }
 +}
 diff --git a/packages/native-client-rust/crates/wechat-core/src/lib.rs b/packages/native-client-rust/crates/wechat-core/src/lib.rs
-index 21c7cda..67de042 100644
+index 21c7cda..182c26a 100644
 --- a/packages/native-client-rust/crates/wechat-core/src/lib.rs
 +++ b/packages/native-client-rust/crates/wechat-core/src/lib.rs
-@@ -6,6 +6,8 @@ pub mod call_types;
+@@ -6,6 +6,7 @@ pub mod call_types;
  pub mod calls;
  mod format;
  mod forwarded;
-+mod forward_send;
 +mod forward_send;
  mod links;
  pub use links::{LinkCard, ShareSendRequest};
@@ -256,7 +255,7 @@ index 585415a..19eda98 100644
              sender,
              title,
 diff --git a/packages/native-client-rust/crates/wechat-core/src/media.rs b/packages/native-client-rust/crates/wechat-core/src/media.rs
-index b201dd5..31c1e71 100644
+index b201dd5..d819ccf 100644
 --- a/packages/native-client-rust/crates/wechat-core/src/media.rs
 +++ b/packages/native-client-rust/crates/wechat-core/src/media.rs
 @@ -116,7 +116,7 @@ struct SendPlan {
@@ -264,7 +263,7 @@ index b201dd5..31c1e71 100644
  }
  #[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 -enum ImageVariantSizing {
-+pub(crate) pub(crate) enum ImageVariantSizing {
++pub(crate) enum ImageVariantSizing {
      #[default]
      Legacy,
      DownscaleOnly,
@@ -282,7 +281,7 @@ index b201dd5..31c1e71 100644
      bytes.iter().map(|b| format!("{b:02x}")).collect()
  }
 -fn image_variants(
-+pub(crate) pub(crate) fn image_variants(
++pub(crate) fn image_variants(
      bytes: &[u8],
      standard: Option<Vec<u8>>,
      thumbnail: Option<Vec<u8>>,
