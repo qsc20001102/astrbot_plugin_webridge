@@ -28,7 +28,7 @@ index 7de329a..2911ecc 100644
                  "recall_identity_mismatch",
                  StatusCode::CONFLICT,
 diff --git a/packages/native-client-rust/crates/wechat-api/src/media.rs b/packages/native-client-rust/crates/wechat-api/src/media.rs
-index 2d255ce..6d5f5aa 100644
+index 2d255ce..4e263a0 100644
 --- a/packages/native-client-rust/crates/wechat-api/src/media.rs
 +++ b/packages/native-client-rust/crates/wechat-api/src/media.rs
 @@ -3,6 +3,12 @@ use super::*;
@@ -80,6 +80,27 @@ index 2d255ce..6d5f5aa 100644
          let request: wechat_core::ShareSendRequest = serde_json::from_value(input)
              .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
          request
+@@ -415,12 +432,16 @@ pub(super) async fn send(
+     if input.get("kind").is_some_and(|v| v != "text") {
+         let request: MediaSendRequest = serde_json::from_value(input)
+             .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
++        let guard = app.core.lock_account(&a).await?;
++        let key = key.to_owned();
++        let job = work(move || {
++            let _guard = guard;
++            app.core.send_media(&a, &key, request)
++        })
++        .await?;
+         return Ok((
+             StatusCode::ACCEPTED,
+-            Json(
+-                serde_json::to_value(app.core.send_media(&a, key, request)?)
+-                    .map_err(anyhow::Error::from)?,
+-            ),
++            Json(serde_json::to_value(job).map_err(anyhow::Error::from)?),
+         ));
+     }
+     let mut input = input;
 diff --git a/packages/native-client-rust/crates/wechat-core/src/media.rs b/packages/native-client-rust/crates/wechat-core/src/media.rs
 index d819ccf..a7b6ad0 100644
 --- a/packages/native-client-rust/crates/wechat-core/src/media.rs
