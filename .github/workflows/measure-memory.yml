@@ -1,0 +1,28 @@
+name: Measure offline Native memory
+on:
+  push:
+    branches: ['codex/memory-probe-20261110']
+    paths: ['Test/measure_memory.py', '.github/workflows/measure-memory.yml']
+permissions:
+  actions: read
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: webridge-native-linux-x86_64
+          run-id: 42807604545
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/Test/engine-artifact
+      - name: Measure a disposable offline account and local uploads
+        env:
+          PROBE_ARTIFACT: ${{ runner.temp }}/Test/engine-artifact
+        run: python3 Test/measure_memory.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webridge-memory-report
+          path: memory-report.json
