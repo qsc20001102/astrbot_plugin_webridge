@@ -1,0 +1,825 @@
+diff --git a/.changeset/webridge-temporary-media.md b/.changeset/webridge-temporary-media.md
+new file mode 100644
+index 0000000..ee26b60
+--- /dev/null
++++ b/.changeset/webridge-temporary-media.md
+@@ -0,0 +1,7 @@
++---
++"@agent-wechat/agent-wechat": patch
++---
++
++Add opt-in temporary media uploads using encrypted staging files, retain unsettled
++jobs, and release staging after completed writeback. Verified outgoing video bytes
++use the profile cache without a duplicate sidecar payload.
+diff --git a/packages/native-client-rust/crates/wechat-api/src/lib.rs b/packages/native-client-rust/crates/wechat-api/src/lib.rs
+index 7de329a..2911ecc 100644
+--- a/packages/native-client-rust/crates/wechat-api/src/lib.rs
++++ b/packages/native-client-rust/crates/wechat-api/src/lib.rs
+@@ -247,6 +247,11 @@ impl From<anyhow::Error> for ApiError {
+                 "media_source_changed",
+             ),
+             ("message_recalled", StatusCode::GONE, "message_recalled"),
++            (
++                "media_source_released",
++                StatusCode::GONE,
++                "media_source_released",
++            ),
+             (
+                 "recall_identity_mismatch",
+                 StatusCode::CONFLICT,
+diff --git a/packages/native-client-rust/crates/wechat-api/src/media.rs b/packages/native-client-rust/crates/wechat-api/src/media.rs
+index 2d255ce..6d5f5aa 100644
+--- a/packages/native-client-rust/crates/wechat-api/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-api/src/media.rs
+@@ -3,6 +3,12 @@ use super::*;
+ use axum::extract::Multipart;
+ use wechat_core::{MediaSendRequest, MediaTransferRequest, MAX_UPLOAD_SOURCE_BYTES};
+ 
++#[derive(Default, Deserialize)]
++struct UploadOptions {
++    #[serde(default)]
++    temporary: bool,
++}
++
+ fn validate_upload_chunk(current: usize, next: usize) -> ApiResult<()> {
+     if current
+         .checked_add(next)
+@@ -71,6 +77,7 @@ async fn upload(
+     State(app): State<App>,
+     Extension(c): Extension<Claims>,
+     Path(a): Path<String>,
++    Query(options): Query<UploadOptions>,
+     mut form: Multipart,
+ ) -> ApiResult<(StatusCode, Json<Value>)> {
+     c.require(Some(&a), "send")?;
+@@ -113,7 +120,14 @@ async fn upload(
+         file = Some((name, mime, bytes));
+     }
+     let (name, mime, bytes) = file.ok_or(ApiError(StatusCode::BAD_REQUEST, "file_required"))?;
+-    let source = work(move || app.core.upload_source(&a, &name, &mime, &bytes)).await?;
++    let source = work(move || {
++        if options.temporary {
++            app.core.upload_temporary_source(&a, &name, &mime, &bytes)
++        } else {
++            app.core.upload_source(&a, &name, &mime, &bytes)
++        }
++    })
++    .await?;
+     Ok((
+         StatusCode::CREATED,
+         Json(serde_json::to_value(source).map_err(anyhow::Error::from)?),
+@@ -398,7 +412,10 @@ pub(super) async fn send(
+     if input.get("quote").is_some() && input.get("kind").is_some_and(|v| v != "text") {
+         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+     }
+-    if input.get("kind").is_some_and(|v| v == "share" || v == "forward") {
++    if input
++        .get("kind")
++        .is_some_and(|v| v == "share" || v == "forward")
++    {
+         let request: wechat_core::ShareSendRequest = serde_json::from_value(input)
+             .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
+         request
+diff --git a/packages/native-client-rust/crates/wechat-core/src/media.rs b/packages/native-client-rust/crates/wechat-core/src/media.rs
+index d819ccf..a7b6ad0 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/media.rs
+@@ -115,6 +115,25 @@ struct SendPlan {
+     #[serde(default)]
+     reuse_completed_upload: Option<CompletedUploadReuse>,
+ }
++impl SendPlan {
++    fn source_ids(&self) -> Vec<&str> {
++        let mut ids = vec![self.request.source_id.as_str()];
++        for id in [
++            &self.request.standard_source_id,
++            &self.request.thumbnail_source_id,
++            &self.prepared_video_source_id,
++            &self.prepared_video_thumbnail_source_id,
++        ]
++        .into_iter()
++        .flatten()
++        {
++            if !ids.contains(&id.as_str()) {
++                ids.push(id.as_str());
++            }
++        }
++        ids
++    }
++}
+ #[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+ pub(crate) enum ImageVariantSizing {
+     #[default]
+@@ -335,6 +354,25 @@ impl Core {
+         name: &str,
+         mime: &str,
+         bytes: &[u8],
++    ) -> Result<OwnedMediaSource> {
++        self.upload_source_with_lifetime(account, name, mime, bytes, false)
++    }
++    pub fn upload_temporary_source(
++        &self,
++        account: &str,
++        name: &str,
++        mime: &str,
++        bytes: &[u8],
++    ) -> Result<OwnedMediaSource> {
++        self.upload_source_with_lifetime(account, name, mime, bytes, true)
++    }
++    fn upload_source_with_lifetime(
++        &self,
++        account: &str,
++        name: &str,
++        mime: &str,
++        bytes: &[u8],
++        temporary: bool,
+     ) -> Result<OwnedMediaSource> {
+         self.store.account(account)?;
+         ensure!(
+@@ -354,7 +392,8 @@ impl Core {
+             mime.len() <= 128 && !mime.chars().any(|c| c.is_control()),
+             "invalid_content_type"
+         );
+-        let id = format!("upload_{}", uuid::Uuid::new_v4());
++        let prefix = if temporary { "upload_tmp_" } else { "upload_" };
++        let id = format!("{prefix}{}", uuid::Uuid::new_v4());
+         let sealed = self
+             .vault
+             .seal_media(account, &format!("source:{id}"), bytes)?;
+@@ -368,7 +407,11 @@ impl Core {
+             &sealed,
+         )
+     }
+-    pub(crate) fn source_bytes(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
++    pub(crate) fn source_bytes(
++        &self,
++        account: &str,
++        id: &str,
++    ) -> Result<(OwnedMediaSource, Vec<u8>)> {
+         let (meta, sealed) = self.store.media_source(account, id)?;
+         let mut opened = self
+             .vault
+@@ -405,11 +448,29 @@ impl Core {
+         self.authorize_media_record(account, &row)?;
+         let asset: MediaAsset = serde_json::from_value(row.metadata.clone())?;
+         ensure!(asset.state == "available", "media_not_available");
+-        let sealed = row.payload.as_deref().context("media_not_cached")?;
+-        let mut opened = self
+-            .vault
+-            .open_media_record(account, &format!("asset:{id}"), sealed)?;
+-        let bytes = std::mem::take(&mut *opened);
++        let bytes = if let Some(sealed) = row.payload.as_deref() {
++            let mut opened =
++                self.vault
++                    .open_media_record(account, &format!("asset:{id}"), sealed)?;
++            std::mem::take(&mut *opened)
++        } else {
++            ensure!(
++                asset.kind == MediaKind::Video && asset.official_writeback == "complete",
++                "media_not_cached"
++            );
++            let DownloadPlan::Cdn { descriptor } = self.asset_plan(account, &row)?.plan else {
++                bail!("media_not_cached");
++            };
++            self.profile_reader_owned(account)?
++                .cached_hardlink_file(
++                    wechat_profile::HardlinkKind::Video,
++                    descriptor
++                        .expected_md5
++                        .as_deref()
++                        .context("media_not_cached")?,
++                )?
++                .bytes
++        };
+         ensure!(
+             asset.byte_length == Some(bytes.len() as u64)
+                 && asset.sha256.as_deref() == Some(&digest(&bytes)),
+@@ -1007,7 +1068,9 @@ impl Core {
+             request.kind != MediaKind::Sticker,
+             "sticker_send_unsupported"
+         );
+-        let (source, _) = self.source_bytes(account, &request.source_id)?;
++        let source = self
++            .store
++            .media_source_metadata(account, &request.source_id)?;
+         let extra_source = |id: &Option<String>| -> Result<Option<OwnedMediaSource>> {
+             id.as_ref()
+                 .map(|id| self.store.media_source_metadata(account, id))
+@@ -1028,6 +1091,21 @@ impl Core {
+             thumbnail.as_ref().map(|source| source.sha256.as_str()),
+             (request.kind == MediaKind::File).then_some(source.name.as_str()),
+         )?;
++        // A replay can return its existing receipt after staging has expired.
++        // New intents must still validate the actual owned source before enqueue.
++        if self
++            .store
++            .media_job_by_key(account, &format!("send:{key}"))
++            .is_err()
++        {
++            self.source_bytes(account, &request.source_id)?;
++            for id in [&request.standard_source_id, &request.thumbnail_source_id]
++                .into_iter()
++                .flatten()
++            {
++                self.source_bytes(account, id)?;
++            }
++        }
+         let id = format!("job_{}", uuid::Uuid::new_v4());
+         let mut plan = SendPlan {
+             request: request.clone(),
+@@ -1058,7 +1136,7 @@ impl Core {
+             &format!("send:{key}"),
+             &hash,
+             "send",
+-            &json!({"threadId":request.thread_id,"sourceId":request.source_id,"completedBytes":0}),
++            &json!({"threadId":request.thread_id,"sourceId":request.source_id,"sourceIds":plan.source_ids(),"completedBytes":0}),
+             &payload,
+         )?;
+         if new {
+@@ -2381,6 +2459,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>> {
+ impl Core {
+     fn save_send_plan(&self, account: &str, id: &str, plan: &SendPlan) -> Result<()> {
+         let mut row = self.store.media_job(account, id)?;
++        row.data["sourceIds"] = json!(plan.source_ids());
+         row.payload = self.vault.seal(
+             account,
+             &format!("media-job:{id}"),
+@@ -2560,8 +2639,13 @@ impl Core {
+                     Ok((seconds, normal))
+                 })?;
+                 state = self.resume_media_state(account, id, &fence)?;
+-                let prepared =
+-                    self.upload_source(account, "video-normal.mp4", "video/mp4", &normal)?;
++                let prepared = if normal.as_slice() == bytes.as_slice() {
++                    source.clone()
++                } else if wechat_store::is_temporary_media_source(&source.id) {
++                    self.upload_temporary_source(account, "video-normal.mp4", "video/mp4", &normal)?
++                } else {
++                    self.upload_source(account, "video-normal.mp4", "video/mp4", &normal)?
++                };
+                 plan.request.play_seconds = Some(seconds);
+                 plan.prepared_video_source_id = Some(prepared.id);
+                 self.save_send_plan(account, id, &plan)?;
+@@ -2806,13 +2890,14 @@ impl Core {
+                     } else {
+                         let thumbnail =
+                             video_thumbnail(&normal, || self.progress_media(account, id, 0, None))?;
+-                        let source = self.upload_source(
++                        let thumb_source = self.upload_source_with_lifetime(
+                             account,
+                             "video-thumbnail.jpg",
+                             "image/jpeg",
+                             &thumbnail,
++                            wechat_store::is_temporary_media_source(&source.id),
+                         )?;
+-                        plan.prepared_video_thumbnail_source_id = Some(source.id);
++                        plan.prepared_video_thumbnail_source_id = Some(thumb_source.id);
+                         self.save_send_plan(account, id, &plan)?;
+                         thumbnail
+                     };
+@@ -3304,8 +3389,26 @@ impl Core {
+                 if status != "complete" || official_media_writeback == "unsupported" {
+                     official_media_writeback = status;
+                 }
+-                let mut cached =
+-                    self.cache_asset(account, &asset.id, &raw, mime, Some(asset.variant), None)?;
++                let mut cached = if plan.request.kind == MediaKind::Video
++                    && wechat_store::is_temporary_media_source(&plan.request.source_id)
++                    && status == "complete"
++                {
++                    // The verified profile cache owns these bytes. Keep the
++                    // asset identity without duplicating the video in SQLite.
++                    let mut cached = asset.clone();
++                    cached.state = "available".into();
++                    cached.content_type = Some(mime.into());
++                    cached.byte_length = Some(raw.len() as u64);
++                    cached.sha256 = Some(expected);
++                    cached.actual_variant = Some(asset.variant);
++                    cached.retryable = false;
++                    cached.reason = None;
++                    cached.content_url =
++                        Some(format!("/v1/accounts/{account}/media/{}/content", asset.id));
++                    cached
++                } else {
++                    self.cache_asset(account, &asset.id, &raw, mime, Some(asset.variant), None)?
++                };
+                 cached.official_writeback = status.into();
+                 self.store.save_media_asset(
+                     account,
+@@ -4469,6 +4572,38 @@ mod tests {
+         (dir, core)
+     }
+     #[test]
++    fn temporary_source_roundtrip_is_encrypted_and_cleanup_preserves_identity() {
++        let (directory, core) = test_core();
++        let bytes = b"original-video-private-bytes";
++        let source = core
++            .upload_temporary_source("one", "video.mp4", "video/mp4", bytes)
++            .unwrap();
++        assert!(wechat_store::is_temporary_media_source(&source.id));
++        let path = directory
++            .path()
++            .join("data/accounts/one/agent/temporary-media")
++            .join(&source.id);
++        assert_ne!(std::fs::read(&path).unwrap(), bytes);
++        assert_eq!(core.source_bytes("one", &source.id).unwrap().1, bytes);
++        assert!(core.source_bytes("two", &source.id).is_err());
++        core.store
++            .cleanup_temporary_media(
++                "one",
++                "2099-01-01T00:00:00+00:00",
++                "2099-01-01T00:00:00+00:00",
++            )
++            .unwrap();
++        assert!(!path.exists());
++        assert!(core.source_bytes("one", &source.id).is_err());
++        assert_eq!(
++            core.store
++                .media_source_metadata("one", &source.id)
++                .unwrap()
++                .sha256,
++            source.sha256
++        );
++    }
++    #[test]
+     fn destination_validation_supports_direct_and_group_without_test_only_restrictions() {
+         for value in ["filehelper", "wxid_synthetic", "123456@chatroom"] {
+             assert!(validate_destination(value).is_ok());
+diff --git a/packages/native-client-rust/crates/wechat-core/src/media_auto.rs b/packages/native-client-rust/crates/wechat-core/src/media_auto.rs
+index 6cd8f7a..d1449eb 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/media_auto.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/media_auto.rs
+@@ -166,15 +166,29 @@ impl Core {
+         let core = self.clone();
+         let account = account.to_owned();
+         tokio::spawn(async move {
++            let mut last_cleanup: Option<std::time::Instant> = None;
+             loop {
+                 if core.stopping.load(Ordering::SeqCst) || core.store.account(&account).is_err() {
+                     break;
+                 }
+                 if let Ok(guard) = core.lock_account(&account).await {
++                    let cleanup =
++                        last_cleanup.is_none_or(|last| last.elapsed() >= Duration::from_secs(60));
++                    if cleanup {
++                        last_cleanup = Some(std::time::Instant::now());
++                    }
+                     let local = core.clone();
+                     let account = account.clone();
+                     let _ = tokio::task::spawn_blocking(move || {
+                         let _guard = guard;
++                        if cleanup {
++                            let now = chrono::Utc::now();
++                            let _ = local.store.cleanup_temporary_media(
++                                &account,
++                                &(now - chrono::Duration::seconds(60)).to_rfc3339(),
++                                &(now - chrono::Duration::hours(1)).to_rfc3339(),
++                            );
++                        }
+                         local.admit_received_media(&account)
+                     })
+                     .await;
+diff --git a/packages/native-client-rust/crates/wechat-store/src/lib.rs b/packages/native-client-rust/crates/wechat-store/src/lib.rs
+index 3b0b980..916d61a 100644
+--- a/packages/native-client-rust/crates/wechat-store/src/lib.rs
++++ b/packages/native-client-rust/crates/wechat-store/src/lib.rs
+@@ -16,6 +16,8 @@ mod pagination;
+ mod read_snapshot;
+ mod recalls;
+ mod settings;
++mod temporary_media;
++pub use temporary_media::{is_temporary_media_source, TEMPORARY_MEDIA_MARKER};
+ pub mod vault;
+ use anyhow::{bail, Context, Result};
+ use fs2::FileExt;
+diff --git a/packages/native-client-rust/crates/wechat-store/src/media.rs b/packages/native-client-rust/crates/wechat-store/src/media.rs
+index f1d8341..23095a4 100644
+--- a/packages/native-client-rust/crates/wechat-store/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-store/src/media.rs
+@@ -203,10 +203,25 @@ impl Store {
+                 bail!("invalid media source");
+             }
+             let now = chrono::Utc::now().to_rfc3339();
+-            db.execute(
++            let temporary = is_temporary_media_source(id);
++            if temporary {
++                self.write_temporary_media(account, id, payload)?;
++            }
++            let stored = if temporary {
++                TEMPORARY_MEDIA_MARKER
++            } else {
++                payload
++            };
++            let inserted = db.execute(
+                 "INSERT INTO media_sources VALUES(?1,?2,?3,?4,?5,?6,?7)",
+-                params![id, name, media_type, byte_length, sha256, payload, now],
+-            )?;
++                params![id, name, media_type, byte_length, sha256, stored, now],
++            );
++            if let Err(error) = inserted {
++                if temporary {
++                    let _ = self.remove_temporary_media(account, id);
++                }
++                return Err(error.into());
++            }
+             Ok(OwnedMediaSource {
+                 id: id.into(),
+                 name: name.into(),
+@@ -218,7 +233,16 @@ impl Store {
+         })
+     }
+     pub fn media_source(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
+-        self.control(account,|db|{Ok(db.query_row("SELECT name,media_type,byte_length,sha256,payload,created_at FROM media_sources WHERE id=?1",[id],|r|Ok((OwnedMediaSource{id:id.into(),name:r.get(0)?,media_type:r.get(1)?,byte_length:r.get(2)?,sha256:r.get(3)?,created_at:r.get(5)?},r.get(4)?)))?)})
++        self.control(account, |db| {
++            let (source, mut payload): (OwnedMediaSource, Vec<u8>) = db.query_row("SELECT name,media_type,byte_length,sha256,payload,created_at FROM media_sources WHERE id=?1", [id], |r| Ok((OwnedMediaSource {id:id.into(),name:r.get(0)?,media_type:r.get(1)?,byte_length:r.get(2)?,sha256:r.get(3)?,created_at:r.get(5)?},r.get(4)?)))?;
++            if is_temporary_media_source(id) {
++                if payload != TEMPORARY_MEDIA_MARKER {
++                    bail!("media_source_released");
++                }
++                payload = self.read_temporary_media(account, id)?;
++            }
++            Ok((source, payload))
++        })
+     }
+     pub fn media_source_metadata(&self, account: &str, id: &str) -> Result<OwnedMediaSource> {
+         self.control(account,|db|{Ok(db.query_row("SELECT name,media_type,byte_length,sha256,created_at FROM media_sources WHERE id=?1",[id],|r|Ok(OwnedMediaSource{id:id.into(),name:r.get(0)?,media_type:r.get(1)?,byte_length:r.get(2)?,sha256:r.get(3)?,created_at:r.get(4)?}))?)})
+diff --git a/packages/native-client-rust/crates/wechat-store/src/temporary_media.rs b/packages/native-client-rust/crates/wechat-store/src/temporary_media.rs
+new file mode 100644
+index 0000000..5d83575
+--- /dev/null
++++ b/packages/native-client-rust/crates/wechat-store/src/temporary_media.rs
+@@ -0,0 +1,374 @@
++//! Sender-owned staging files. Account/profile caches and original paths are never removed.
++use crate::*;
++use std::io::{Read, Write};
++
++pub const TEMPORARY_MEDIA_MARKER: &[u8] = b"temporary-media-file-v1";
++
++pub fn is_temporary_media_source(id: &str) -> bool {
++    id.starts_with("upload_tmp_")
++}
++
++impl Store {
++    fn temporary_media_path(&self, account: &str, id: &str) -> Result<PathBuf> {
++        if !is_temporary_media_source(id)
++            || id.len() > 100
++            || !id
++                .bytes()
++                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
++        {
++            bail!("invalid temporary media identity");
++        }
++        let directory = self.account_dir(account)?.join("agent/temporary-media");
++        private_dir(&directory)?;
++        Ok(directory.join(id))
++    }
++
++    pub(crate) fn write_temporary_media(
++        &self,
++        account: &str,
++        id: &str,
++        bytes: &[u8],
++    ) -> Result<()> {
++        let path = self.temporary_media_path(account, id)?;
++        let mut file = wechat_platform::OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .mode(0o600)
++            .custom_flags(wechat_platform::NOFOLLOW)
++            .open(&path)?;
++        if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
++            drop(file);
++            let _ = fs::remove_file(path);
++            return Err(error.into());
++        }
++        Ok(())
++    }
++
++    pub(crate) fn read_temporary_media(&self, account: &str, id: &str) -> Result<Vec<u8>> {
++        let path = self.temporary_media_path(account, id)?;
++        let file = wechat_platform::OpenOptions::new()
++            .read(true)
++            .custom_flags(wechat_platform::NOFOLLOW)
++            .open(path)
++            .context("media_source_released")?;
++        let metadata = file.metadata()?;
++        let limit = wechat_media::MAX_MEDIA_SOURCE_BYTES.saturating_add(4096);
++        if !metadata.is_file() || metadata.len() > limit as u64 {
++            bail!("invalid temporary media file");
++        }
++        let mut bytes = Vec::new();
++        file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
++        if bytes.len() > limit {
++            bail!("invalid temporary media file");
++        }
++        Ok(bytes)
++    }
++
++    pub(crate) fn remove_temporary_media(&self, account: &str, id: &str) -> Result<()> {
++        fs::remove_file(self.temporary_media_path(account, id)?)?;
++        Ok(())
++    }
++
++    /// Release staging only after all referring jobs are settled. Metadata remains
++    /// available for idempotency; uncertain/retryable jobs retain their bytes.
++    pub fn cleanup_temporary_media(
++        &self,
++        account: &str,
++        completed_before: &str,
++        orphan_before: &str,
++    ) -> Result<usize> {
++        self.control(account, |db| {
++            let mut query = db.prepare(
++                "SELECT s.id FROM media_sources s
++                 WHERE s.id GLOB 'upload_tmp_*' AND s.payload=?1
++                 AND NOT EXISTS (
++                   SELECT 1 FROM media_jobs j
++                   WHERE (json_extract(j.data_json,'$.sourceId')=s.id OR EXISTS (
++                     SELECT 1 FROM json_each(j.data_json,'$.sourceIds') r WHERE r.value=s.id))
++                   AND NOT coalesce((
++                     julianday(j.updated_at)<=julianday(?2) AND (
++                       (j.state='accepted'
++                        AND json_extract(j.data_json,'$.result.profileProjection')='complete'
++                        AND json_extract(j.data_json,'$.result.officialMediaWriteback')='complete')
++                       OR (j.state IN ('failed','cancelled') AND j.retryable=0
++                           AND json_extract(j.data_json,'$.serverMessageId') IS NULL
++                           AND json_extract(j.data_json,'$.result.nativeReceipt') IS NULL
++                           AND coalesce(json_array_length(j.data_json,'$.result.messageIds'),0)=0))
++                   ),0)
++                 )
++                 AND (julianday(s.created_at)<=julianday(?3) OR EXISTS (
++                   SELECT 1 FROM media_jobs j
++                   WHERE json_extract(j.data_json,'$.sourceId')=s.id OR EXISTS (
++                     SELECT 1 FROM json_each(j.data_json,'$.sourceIds') r WHERE r.value=s.id)))
++                 ORDER BY s.created_at,s.id LIMIT 100",
++            )?;
++            let ids = query
++                .query_map(
++                    params![TEMPORARY_MEDIA_MARKER, completed_before, orphan_before],
++                    |r| r.get::<_, String>(0),
++                )?
++                .collect::<rusqlite::Result<Vec<_>>>()?;
++            drop(query);
++            let mut released = 0;
++            for id in ids {
++                let path = self.temporary_media_path(account, &id)?;
++                match fs::remove_file(path) {
++                    Ok(()) => {}
++                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
++                    Err(_) => continue,
++                }
++                released += db.execute(
++                    "UPDATE media_sources SET payload=X'' WHERE id=?1 AND payload=?2",
++                    params![id, TEMPORARY_MEDIA_MARKER],
++                )?;
++            }
++            // A crash between file creation and the SQLite insert can leave an
++            // unreferenced file. Only our validated namespace is eligible.
++            let directory = self.account_dir(account)?.join("agent/temporary-media");
++            let cutoff = chrono::DateTime::parse_from_rfc3339(orphan_before)?;
++            if let Ok(entries) = fs::read_dir(directory) {
++                for entry in entries.take(1000) {
++                    let entry = entry?;
++                    let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
++                        continue;
++                    };
++                    if !is_temporary_media_source(&id)
++                        || self.temporary_media_path(account, &id).is_err()
++                    {
++                        continue;
++                    }
++                    let metadata = fs::symlink_metadata(entry.path())?;
++                    if !metadata.is_file() || wechat_platform::is_link(&metadata) {
++                        continue;
++                    }
++                    let modified: chrono::DateTime<chrono::Utc> = metadata.modified()?.into();
++                    if modified >= cutoff {
++                        continue;
++                    }
++                    let exists: bool = db.query_row(
++                        "SELECT EXISTS(SELECT 1 FROM media_sources WHERE id=?1)",
++                        [&id],
++                        |r| r.get(0),
++                    )?;
++                    if !exists && fs::remove_file(entry.path()).is_ok() {
++                        released += 1;
++                    }
++                }
++            }
++            Ok(released)
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    const BEFORE: &str = "2000-01-01T00:00:00+00:00";
++    const AFTER: &str = "2099-01-01T00:00:00+00:00";
++
++    fn setup() -> (tempfile::TempDir, Store) {
++        let directory = tempfile::tempdir().unwrap();
++        let store = Store::open(&directory.path().join("data")).unwrap();
++        store.create_account("one").unwrap();
++        store.create_account("two").unwrap();
++        (directory, store)
++    }
++
++    fn source(store: &Store, account: &str, id: &str) {
++        store
++            .create_media_source(
++                account,
++                id,
++                "video.mp4",
++                "video/mp4",
++                100,
++                &"a".repeat(64),
++                b"opaque-encrypted-video",
++            )
++            .unwrap();
++    }
++
++    fn job(
++        store: &Store,
++        id: &str,
++        source: &str,
++        state: &str,
++        retryable: bool,
++        result: serde_json::Value,
++    ) {
++        store
++            .create_media_job(
++                "one",
++                id,
++                &format!("send:{id}"),
++                &"a".repeat(64),
++                "send",
++                &json!({"sourceId":"another-primary", "sourceIds":[source], "result":result}),
++                b"plan",
++            )
++            .unwrap();
++        store
++            .control("one", |db| {
++                db.execute(
++                    "UPDATE media_jobs SET state=?2,retryable=?3 WHERE id=?1",
++                    params![id, state, retryable],
++                )?;
++                Ok(())
++            })
++            .unwrap();
++    }
++
++    #[test]
++    fn temporary_sources_are_file_backed_and_survive_restart() {
++        let (directory, store) = setup();
++        source(&store, "one", "upload_tmp_test");
++        let path = store
++            .temporary_media_path("one", "upload_tmp_test")
++            .unwrap();
++        assert_eq!(fs::read(&path).unwrap(), b"opaque-encrypted-video");
++        store
++            .control("one", |db| {
++                let payload: Vec<u8> = db.query_row(
++                    "SELECT payload FROM media_sources WHERE id='upload_tmp_test'",
++                    [],
++                    |r| r.get(0),
++                )?;
++                assert_eq!(payload, TEMPORARY_MEDIA_MARKER);
++                Ok(())
++            })
++            .unwrap();
++        assert!(store.media_source("two", "upload_tmp_test").is_err());
++        drop(store);
++        let store = Store::open(&directory.path().join("data")).unwrap();
++        assert_eq!(
++            store.media_source("one", "upload_tmp_test").unwrap().1,
++            b"opaque-encrypted-video"
++        );
++        assert_eq!(
++            store.cleanup_temporary_media("one", AFTER, BEFORE).unwrap(),
++            0
++        );
++        assert_eq!(
++            store.cleanup_temporary_media("one", AFTER, AFTER).unwrap(),
++            1
++        );
++        assert!(!path.exists());
++        assert!(store
++            .media_source("one", "upload_tmp_test")
++            .unwrap_err()
++            .to_string()
++            .contains("media_source_released"));
++        assert_eq!(
++            store
++                .media_source_metadata("one", "upload_tmp_test")
++                .unwrap()
++                .byte_length,
++            100
++        );
++        assert_eq!(
++            store.cleanup_temporary_media("one", AFTER, AFTER).unwrap(),
++            0
++        );
++    }
++
++    #[test]
++    fn cleanup_requires_confirmed_complete_writeback_and_grace_period() {
++        for (state, retryable, result, releasable) in [
++            ("queued", false, json!({}), false),
++            ("running", false, json!({}), false),
++            ("needs_review", false, json!({}), false),
++            ("partial", false, json!({}), false),
++            ("accepted", false, json!({}), false),
++            (
++                "accepted",
++                false,
++                json!({"profileProjection":"complete"}),
++                false,
++            ),
++            (
++                "accepted",
++                false,
++                json!({"profileProjection":"complete","officialMediaWriteback":"blocked"}),
++                false,
++            ),
++            (
++                "accepted",
++                false,
++                json!({"profileProjection":"complete","officialMediaWriteback":"complete"}),
++                true,
++            ),
++            ("failed", true, json!({}), false),
++            ("failed", false, json!({}), true),
++            ("cancelled", false, json!({}), true),
++        ] {
++            let (_directory, store) = setup();
++            source(&store, "one", "upload_tmp_job");
++            job(&store, "job", "upload_tmp_job", state, retryable, result);
++            assert_eq!(
++                store.cleanup_temporary_media("one", BEFORE, AFTER).unwrap(),
++                0,
++                "{state}"
++            );
++            assert_eq!(
++                store.cleanup_temporary_media("one", AFTER, AFTER).unwrap(),
++                usize::from(releasable),
++                "{state}"
++            );
++        }
++    }
++
++    #[test]
++    fn shared_active_sources_durable_uploads_and_user_files_are_preserved() {
++        let (directory, store) = setup();
++        source(&store, "one", "upload_tmp_shared");
++        source(&store, "one", "upload_durable");
++        source(&store, "two", "upload_tmp_shared");
++        let original = directory.path().join("original.mp4");
++        fs::write(&original, b"user-owned-video").unwrap();
++        let complete = json!({"profileProjection":"complete","officialMediaWriteback":"complete"});
++        job(
++            &store,
++            "done",
++            "upload_tmp_shared",
++            "accepted",
++            false,
++            complete.clone(),
++        );
++        job(
++            &store,
++            "active",
++            "upload_tmp_shared",
++            "running",
++            false,
++            json!({}),
++        );
++        assert_eq!(
++            store.cleanup_temporary_media("one", AFTER, AFTER).unwrap(),
++            0
++        );
++        store.control("one", |db| {
++            db.execute("UPDATE media_jobs SET state='accepted',data_json=json_set(data_json,'$.result',json(?1)) WHERE id='active'", [complete.to_string()])?;
++            Ok(())
++        }).unwrap();
++        assert_eq!(
++            store.cleanup_temporary_media("one", AFTER, AFTER).unwrap(),
++            1
++        );
++        assert!(store.media_source("one", "upload_durable").is_ok());
++        assert!(store.media_source("two", "upload_tmp_shared").is_ok());
++        assert_eq!(fs::read(original).unwrap(), b"user-owned-video");
++        assert!(store
++            .create_media_source(
++                "one",
++                "upload_tmp_../../original.mp4",
++                "bad",
++                "video/mp4",
++                1,
++                &"a".repeat(64),
++                b"bad"
++            )
++            .is_err());
++    }
++}
