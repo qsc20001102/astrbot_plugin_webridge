@@ -68,7 +68,10 @@ def main():
 
                     def sample():
                         while not stop.wait(.01):
-                            peak[0] = max(peak[0], memory(engine.pid)["VmRSS"])
+                            try:
+                                peak[0] = max(peak[0], memory(engine.pid)["VmRSS"])
+                            except FileNotFoundError:
+                                return
 
                     sampler = threading.Thread(target=sample)
                     sampler.start()
@@ -89,7 +92,7 @@ def main():
                     response = connection.getresponse()
                     result = json.loads(response.read())
                     assert response.status == 201, response.status
-                    assert result["sourceId"].startswith("upload_tmp_")
+                    assert result["id"].startswith("upload_tmp_")
                     connection.close()
                     time.sleep(.1)
                     stop.set()
