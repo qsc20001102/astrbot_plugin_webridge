@@ -1,0 +1,18 @@
+{
+  "version": "1.5.1",
+  "target": "x86_64-unknown-linux-gnu",
+  "upstream_commit": "39af1eec84f4763e1257406f8c5fb848b31d82e9",
+  "image_original": true,
+  "sha256": "28955089136b251513df648e48585b4912c9ed1bc67866f82a90e2484c5e6bb0",
+  "patch_sha256": "b91a01a4322245c8d22a511b1a818dd1d16cf803186d89ce64c8ddddacb8b2ea",
+  "minimum_glibc": "2.36",
+  "rustc": "1.93.1",
+  "video_passthrough": true,
+  "video_size_policy": "protocol_only",
+  "incoming_video_download": false,
+  "forward_patch_sha256": "8a71e8be59368e609852accd07753082fdb5a679ece06c5dc31f4ed896a9322b",
+  "merged_forward": true,
+  "forward_projection": "xml-v1",
+  "temporary_media_sources": true,
+  "media_lifecycle_patch_sha256": "ad6c1eed20c1ff85c2d9e519851835152b46a3507482686f9ab348699dc608ca"
+}

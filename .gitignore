@@ -1,0 +1,32 @@
+# Python and development caches
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Rebuild workspaces and distribution archives
+.native-src/
+.native-work/
+build/
+dist/
+*.egg-info/
+
+# Runtime data and local credentials
+data/
+.env
+.env.*
+api-token
+*token.local*
+server.local.*
+local-config*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.lock
+*.log

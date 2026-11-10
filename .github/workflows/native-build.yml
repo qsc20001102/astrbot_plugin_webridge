@@ -1,0 +1,30 @@
+name: Build Native engine
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'native/patches/**'
+      - 'native/build-linux.sh'
+      - 'native/Dockerfile.build'
+      - '.github/workflows/native-build.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test the pinned engine
+        env:
+          WEBRIDGE_BUILD_DIR: ${{ runner.temp }}/Test/webridge-native-build
+          CARGO_BUILD_JOBS: '3'
+        run: bash native/build-linux.sh
+      - name: Verify executable
+        run: bin/linux-x86_64/wx --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webridge-native-linux-x86_64
+          path: |
+            bin/linux-x86_64/wx
+            native/manifest.json

@@ -1,0 +1,5 @@
+FROM rust:1.93.1-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31
+RUN apt-get update && apt-get install -y --no-install-recommends cmake ffmpeg python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add --toolchain 1.93.1 rustfmt clippy
+WORKDIR /work

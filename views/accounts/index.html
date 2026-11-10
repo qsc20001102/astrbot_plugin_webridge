@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>微信消息适配器 · 微信管理</title>
+    <link rel="icon" type="image/png" href="./logo.png" />
+    <link rel="stylesheet" href="./style.css?v=console-20261110" />
+  </head>
+  <body>
+    <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 11-1l3 6M4 12l3 6a7 7 0 0 0 11-1" /></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5" /></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></symbol>
+      <symbol id="i-scan" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M8 8h2v2H8zm6 0h2v2h-2zm-6 6h2v2H8zm6 0h2v2h-2z" /></symbol>
+    </svg>
+    <main class="console">
+      <header class="page-header">
+        <div class="identity">
+          <img class="mark" src="./logo.png" alt="" width="36" height="36" />
+          <div><h1>微信消息适配器</h1><p>WeBridge <span aria-hidden="true">/</span> 微信管理</p></div>
+        </div>
+        <div class="engine"><span id="engine-status" role="status">正在连接</span><span id="version"></span></div>
+      </header>
+      <div class="feedback">
+        <p id="notice" role="status" hidden></p>
+        <p id="error" role="alert" hidden></p>
+      </div>
+      <section id="engine-help" class="engine-help" hidden>
+        <div><h2>微信引擎尚未就绪</h2><p id="engine-reason">正在启动内置微信引擎。</p></div>
+        <button id="start-engine" class="secondary" type="button">重新启动</button>
+      </section>
+      <div class="workbench">
+        <aside class="account-rail" aria-labelledby="accounts-heading">
+          <div class="rail-heading"><h2 id="accounts-heading">微信账号 <span id="account-count">0</span></h2><button id="refresh" class="icon-button" type="button" aria-label="刷新账号" title="刷新账号"><svg class="icon"><use href="#i-refresh" /></svg></button></div>
+          <div id="empty-state" class="empty" hidden><p>还没有微信账号</p><p>添加一个账号，开始连接。</p></div>
+          <div id="account-list" class="account-list" aria-label="选择微信账号"></div>
+          <button id="add-account" class="add-account secondary" type="button" disabled><svg class="icon"><use href="#i-plus" /></svg>添加微信</button>
+          <form id="add-form" hidden>
+            <label for="account-alias">账号名称</label>
+            <input id="account-alias" maxlength="64" value="我的微信" autocomplete="off" required />
+            <div class="button-row"><button id="create-account" type="submit">添加并登录</button><button id="cancel-add" class="quiet" type="button">取消</button></div>
+          </form>
+          <p class="rail-note">账号登录信息保存在当前服务中，刷新页面后可继续操作。</p>
+        </aside>
+        <div class="workspace">
+          <header class="account-header"><div><p class="section-label">当前账号</p><h2 id="account-name">连接你的微信</h2></div><button id="logout" class="quiet danger" type="button" hidden>退出登录</button></header>
+          <ol class="connection-path" aria-label="接入进度">
+            <li id="step-login" aria-current="step"><span class="step-number">01</span><span>微信登录</span><span id="step-login-state" class="step-state">待登录</span></li>
+            <li id="step-connect"><span class="step-number">02</span><span>AstrBot 接入</span><span id="step-connect-state" class="step-state">待接入</span></li>
+          </ol>
+          <section class="login-section" aria-labelledby="login-heading">
+            <div class="login-visual">
+              <div id="qr-placeholder" class="qr-placeholder"><svg class="scan-mark" aria-hidden="true"><use href="#i-scan" /></svg><span>手机微信扫码</span></div>
+              <div id="qr-content" hidden><div class="qr-frame"><img id="qr-image" alt="微信登录二维码" hidden /><span id="qr-waiting">二维码准备中</span></div></div>
+              <div id="login-success" class="login-success" hidden><svg class="success-mark" aria-hidden="true"><use href="#i-check" /></svg><h3>微信已登录</h3><p id="success-caption">可以接入 AstrBot</p></div>
+            </div>
+            <div class="login-copy">
+              <h2 id="login-heading">微信登录</h2>
+              <p id="login-description">选择左侧账号，获取二维码后用手机微信扫码，并在手机上确认登录。</p>
+              <p id="login-status" class="login-status" role="status" aria-live="polite" hidden>等待扫码</p>
+              <div id="login-actions" class="button-row"><button id="login" type="button" disabled>获取登录二维码<svg class="icon"><use href="#i-arrow" /></svg></button><button id="cancel-login" class="secondary" type="button" hidden>取消登录</button></div>
+              <p id="qr-hint" class="hint">二维码仅用于当前账号登录，请勿转发。</p>
+            </div>
+          </section>
+          <dl id="account-details" class="account-details" hidden><div><dt>微信状态</dt><dd id="account-state">未登录</dd></div><div><dt>消息平台</dt><dd id="platform-state">尚未接入</dd></div></dl>
+          <section class="connect-section" aria-labelledby="connect-heading"><div><h2 id="connect-heading">接入 AstrBot</h2><p id="connect-description">登录后创建消息平台，即可使用 AstrBot 的模型与插件。</p><p id="connect-result" class="connect-result" role="status" hidden></p></div><button id="connect" type="button" disabled>一键接入 AstrBot</button></section>
+        </div>
+      </div>
+      <footer><span>WeBridge <span aria-hidden="true">·</span> 内置微信引擎</span><span>Linux x86_64</span></footer>
+    </main>
+    <script type="module" src="./app.js?v=console-20261110"></script>
+  </body>
+</html>

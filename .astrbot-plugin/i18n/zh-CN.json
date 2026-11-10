@@ -1,0 +1,8 @@
+{
+  "views": {
+    "accounts": {
+      "title": "微信管理",
+      "description": "管理微信账号、扫码登录并接入 AstrBot。"
+    }
+  }
+}

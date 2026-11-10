@@ -1,0 +1,25 @@
+name: astrbot_plugin_webridge
+display_name: 微信消息适配器
+short_desc: 内置微信引擎，扫码一键接入；支持原图、语音、视频和合并转发。
+desc: |
+  微信消息适配器是独立的 webridge 消息平台，使用自己的配置和状态目录，不导入原插件数据。
+  内置 Linux x86_64 Native 引擎，在插件界面扫码登录并一键创建消息平台。
+  仅负责消息接收、组件转换和发送，JPEG 原图不重新压缩。
+  支持文本、图片、语音、@和引用，以及视频发送、聊天记录卡片发送与解析。收到视频直接忽略。
+  唤醒词、白名单、群内会话隔离、模型、插件和回复样式由机器人绑定的 AstrBot 配置决定。
+  聊天记录使用 AstrBot 标准 Node/Nodes，按当前会话官方解析配置提供消息内容。
+  不注册群摘要、历史查询或群管理工具。
+  保留断线重连、持久化去重、发送幂等和回执；普通文件收发暂不支持。
+  需要 Linux x86_64、glibc 2.36+，已针对 AstrBot v4.29.4 验证。
+version: 1.1.2
+author: qsc20001102
+category: utilities
+astrbot_version: ">=4.29.4,<5"
+repo: https://github.com/qsc20001102/astrbot_plugin_webridge
+social_link: https://github.com/qsc20001102
+tags:
+  - 个人微信
+  - 平台适配器
+  - 消息收发
+  - 语音收发
+  - 视频发送

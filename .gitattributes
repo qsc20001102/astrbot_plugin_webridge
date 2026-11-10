@@ -1,0 +1,6 @@
+native/*.sh text eol=lf
+native/Dockerfile.build text eol=lf
+native/patches/*.patch text eol=lf whitespace=-blank-at-eol
+# Preserve upstream license text and unified-diff context verbatim.
+native/licenses/* whitespace=-blank-at-eol
+bin/linux-x86_64/wx binary

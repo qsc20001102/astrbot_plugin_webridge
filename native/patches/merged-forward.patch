@@ -1,0 +1,591 @@
+diff --git a/packages/native-client-rust/Cargo.lock b/packages/native-client-rust/Cargo.lock
+index 2f2ccfd..a4773ca 100644
+--- a/packages/native-client-rust/Cargo.lock
++++ b/packages/native-client-rust/Cargo.lock
+@@ -2895,6 +2895,7 @@ dependencies = [
+  "image",
+  "openssl",
+  "reqwest",
++ "roxmltree",
+  "serde",
+  "serde_json",
+  "wechat-media",
+diff --git a/packages/native-client-rust/crates/wechat-api/src/contracts.rs b/packages/native-client-rust/crates/wechat-api/src/contracts.rs
+index e0580cd..f60dfce 100644
+--- a/packages/native-client-rust/crates/wechat-api/src/contracts.rs
++++ b/packages/native-client-rust/crates/wechat-api/src/contracts.rs
+@@ -29,6 +29,9 @@ pub struct NativeMessage {
+     #[serde(default)]
+     #[ts(optional)]
+     pub quote: Option<NativeQuoteReference>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub forward_xml: Option<String>,
+     #[serde(default)]
+     #[ts(optional)]
+     pub link: Option<wechat_core::LinkCard>,
+@@ -78,6 +81,9 @@ pub struct NativeQuoteReference {
+     #[serde(default)]
+     #[ts(optional)]
+     pub embedded_text: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub embedded_forward_xml: Option<String>,
+     #[serde(default)]
+     #[ts(optional)]
+     pub embedded_image: Option<bool>,
+@@ -489,6 +495,8 @@ pub fn typescript() -> String {
+         wechat_core::TextMentions::decl(),
+         NativeTextSendRequest::decl(),
+         wechat_core::ShareSendRequest::decl(),
++        wechat_core::ForwardNode::decl(),
++        wechat_core::ForwardPart::decl(),
+         NativeRecallRequest::decl(),
+         NativeReadRequest::decl(),
+         NativeForgetRequest::decl(),
+@@ -627,6 +635,25 @@ mod tests {
+         .is_err());
+     }
+     #[test]
++    fn forward_contract_preserves_the_standard_node_envelope_and_rejects_empty_records() {
++        let body = serde_json::json!({"kind":"forward","threadId":"peer","nodes":[{
++            "name":"Alice", "uin":"author", "time":123,
++            "content":[{"type":"text","text":"hello"}]
++        }]});
++        let request: wechat_core::ShareSendRequest = serde_json::from_value(body.clone()).unwrap();
++        request.validate().unwrap();
++        assert_eq!(serde_json::to_value(request).unwrap(), body);
++        let empty: wechat_core::ShareSendRequest = serde_json::from_value(
++            serde_json::json!({"kind":"forward","threadId":"peer","nodes":[]})
++        ).unwrap();
++        assert!(empty.validate().is_err());
++        let generated = typescript();
++        assert!(generated.contains("forwardXml?: string"));
++        assert!(generated.contains("embeddedForwardXml?: string"));
++        assert!(generated.contains("type ForwardNode ="));
++        assert!(generated.contains("type ForwardPart ="));
++    }
++    #[test]
+     fn generated_contract_uses_lossless_strings_and_nullable_metadata() {
+         let generated = typescript();
+         assert!(generated.contains("NATIVE_MAX_SOURCE_BYTES = 536870912 as const"));
+diff --git a/packages/native-client-rust/crates/wechat-api/src/media.rs b/packages/native-client-rust/crates/wechat-api/src/media.rs
+index 7c5b9f5..2d255ce 100644
+--- a/packages/native-client-rust/crates/wechat-api/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-api/src/media.rs
+@@ -398,7 +398,7 @@ pub(super) async fn send(
+     if input.get("quote").is_some() && input.get("kind").is_some_and(|v| v != "text") {
+         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+     }
+-    if input.get("kind").is_some_and(|v| v == "share") {
++    if input.get("kind").is_some_and(|v| v == "share" || v == "forward") {
+         let request: wechat_core::ShareSendRequest = serde_json::from_value(input)
+             .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
+         request
+diff --git a/packages/native-client-rust/crates/wechat-core/src/forward_send.rs b/packages/native-client-rust/crates/wechat-core/src/forward_send.rs
+new file mode 100644
+index 0000000..aeece92
+--- /dev/null
++++ b/packages/native-client-rust/crates/wechat-core/src/forward_send.rs
+@@ -0,0 +1,285 @@
++//! Combine-and-forward cards use the existing durable app-message send queue.
++use anyhow::{ensure, Result};
++use serde::{Deserialize, Serialize};
++use ts_rs::TS;
++use wechat_protocol::media::{MediaQuality, PreparedUpload, UploadedMedia};
++
++#[derive(Clone, Debug, Serialize, Deserialize, TS)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct ForwardNode {
++    pub name: String,
++    pub uin: String,
++    pub time: u32,
++    pub content: Vec<ForwardPart>,
++}
++
++#[derive(Clone, Debug, Serialize, Deserialize, TS)]
++#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
++pub enum ForwardPart {
++    Text { text: String },
++    Image {
++        #[serde(rename = "sourceId")]
++        source_id: String,
++    },
++    Forward { nodes: Vec<ForwardNode> },
++}
++
++fn tag(name: &str, value: &str) -> String {
++    let escaped = value.replace('&', "&amp;").replace('<', "&lt;")
++        .replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;");
++    format!("<{name}>{escaped}</{name}>")
++}
++
++fn valid(value: &str, max: usize) -> bool {
++    value.len() <= max && value.chars().all(|c| {
++        (!c.is_control() || matches!(c, '\n' | '\t' | '\r'))
++            && !matches!(c, '\u{fffe}' | '\u{ffff}')
++    })
++}
++
++pub(crate) fn validate(nodes: &[ForwardNode]) -> Result<()> {
++    fn walk(nodes: &[ForwardNode], depth: usize, count: &mut usize, bytes: &mut usize) -> Result<()> {
++        ensure!(!nodes.is_empty() && depth <= 8, "invalid_forward_nodes");
++        for node in nodes {
++            *count += 1;
++            *bytes += node.name.len() + node.uin.len();
++            ensure!(*count <= 500 && valid(&node.name, 1024) && valid(&node.uin, 256)
++                && !node.content.is_empty(), "invalid_forward_node");
++            for part in &node.content {
++                *count += 1;
++                ensure!(*count <= 1024, "invalid_forward_nodes");
++                match part {
++                    ForwardPart::Text { text } => {
++                        ensure!(valid(text, 64 * 1024), "invalid_forward_text");
++                        *bytes += text.len();
++                    }
++                    ForwardPart::Image { source_id } => {
++                        ensure!(!source_id.is_empty() && valid(source_id, 256), "invalid_forward_image");
++                    }
++                    ForwardPart::Forward { nodes } => walk(nodes, depth + 1, count, bytes)?,
++                }
++                ensure!(*bytes <= 128 * 1024, "forward_size_limit");
++            }
++        }
++        Ok(())
++    }
++    walk(nodes, 0, &mut 0, &mut 0)
++}
++
++fn record(
++    nodes: &[ForwardNode],
++    image: &mut dyn FnMut(&str) -> Result<String>,
++) -> Result<String> {
++    let mut items = Vec::new();
++    for node in nodes {
++        for part in &node.content {
++            let (datatype, body) = match part {
++                ForwardPart::Text { text } => (1, tag("datadesc", text)),
++                ForwardPart::Image { source_id } => (2, image(source_id)?),
++                ForwardPart::Forward { nodes } => (17, format!("{}{}",
++                    tag("datatitle", "聊天记录"), tag("recordxml", &record(nodes, image)?))),
++            };
++            let data_id = uuid::Uuid::new_v4().simple().to_string();
++            let name = tag("sourcename", &node.name);
++            let sender = tag("realchatname", &node.uin);
++            let time = chrono::DateTime::from_timestamp(i64::from(node.time), 0)
++                .map(|stamp| stamp.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
++            items.push(format!("<dataitem datatype=\"{datatype}\" dataid=\"{data_id}\">{body}{name}{}{}<dataitemsource>{name}{sender}</dataitemsource></dataitem>",
++                tag("sourcetime", &time), tag("srcMsgCreateTime", &node.time.to_string())));
++        }
++    }
++    Ok(format!("<recordinfo>{}<datalist count=\"{}\">{}</datalist></recordinfo>",
++        tag("title", "聊天记录"), items.len(), items.join("")))
++}
++
++pub(crate) fn xml(
++    sender: &str,
++    nodes: &[ForwardNode],
++    image: &mut dyn FnMut(&str) -> Result<String>,
++) -> Result<String> {
++    validate(nodes)?;
++    let record = record(nodes, image)?;
++    let xml = format!("<appmsg appid=\"\" sdkver=\"0\">{}{}<type>19</type><showtype>0</showtype>{}<appattach/></appmsg>{}",
++        tag("title", "聊天记录"), tag("des", &format!("{} 条聊天记录", nodes.len())),
++        tag("recorditem", &record), tag("fromusername", sender));
++    ensure!(xml.len() <= 256 * 1024, "forward_size_limit");
++    Ok(xml)
++}
++
++fn hex(bytes: &[u8]) -> String {
++    bytes.iter().map(|value| format!("{value:02x}")).collect()
++}
++
++fn record_image_xml(
++    original: &[u8],
++    thumbnail: &[u8],
++    thread: &str,
++    upload: &mut dyn FnMut(&PreparedUpload) -> Result<UploadedMedia>,
++) -> Result<String> {
++    let thumb_info = wechat_media::inspect_image(thumbnail)?;
++    // RecordMsgCDNService reads BOTH objects as FULLSIZEIMAGE (filetype 1).
++    // A chat-image upload shares one file ID across qualities 1/2/3, so its
++    // type-3 thumbnail cannot be placed in a record's type-1 thumbnail slot.
++    let original_upload = PreparedUpload::prepare(
++        original, MediaQuality::Original, "image.jpg", thread,
++    )?;
++    let thumbnail_upload = PreparedUpload::prepare(
++        thumbnail, MediaQuality::Original, "thumb.jpg", thread,
++    )?;
++    let image = upload(&original_upload)?;
++    let thumb = upload(&thumbnail_upload)?;
++    let mut xml = tag("datadesc", "[图片]");
++    // Record messages use these names; favorite XML's cdn_dataurl/fullsize
++    // spellings are not recognized by the record-message parser.
++    for (name, value) in [
++        ("datafmt", "jpg".to_owned()),
++        ("dataext", "jpg".to_owned()),
++        ("cdndataurl", image.descriptor.file_id.clone()),
++        ("cdndatakey", hex(&image.descriptor.aes_key)),
++        ("cdnthumburl", thumb.descriptor.file_id.clone()),
++        ("cdnthumbkey", hex(&thumb.descriptor.aes_key)),
++        ("fullmd5", image.md5.clone()),
++        ("head256md5", hex(&wechat_protocol::crypto::md5(&original[..original.len().min(256)]))),
++        ("datasize", image.plaintext_bytes.to_string()),
++        ("thumbfullmd5", thumb.md5.clone()),
++        ("thumbhead256md5", hex(&wechat_protocol::crypto::md5(&thumbnail[..thumbnail.len().min(256)]))),
++        ("thumbsize", thumb.plaintext_bytes.to_string()),
++        ("thumbwidth", thumb_info.width.to_string()),
++        ("thumbheight", thumb_info.height.to_string()),
++    ] {
++        xml.push_str(&tag(name, &value));
++    }
++    Ok(xml)
++}
++
++impl crate::Core {
++    pub(crate) fn forward_image_xml(
++        &self,
++        account: &str,
++        thread: &str,
++        source_id: &str,
++        state: &mut wechat_protocol::AccountState,
++    ) -> Result<String> {
++        let (_, bytes) = self.source_bytes(account, source_id)?;
++        let (original, _, thumbnail) = crate::media::image_variants(
++            &bytes, None, None, crate::media::ImageVariantSizing::PreserveOriginal,
++        )?;
++        let transport = self.upstream.media_transport_route(state, None)?;
++        let progress = |_, _| {
++            ensure!(!self.stopping.load(std::sync::atomic::Ordering::SeqCst)
++                && self.store.runtime(account, "desired")?.as_deref() == Some(b"connected"),
++                "forward_cancelled");
++            Ok(())
++        };
++        record_image_xml(&original, &thumbnail, thread, &mut |prepared| {
++            transport.upload(prepared, &progress)
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn node(text: &str) -> ForwardNode {
++        ForwardNode { name: "Alice & Bob".into(), uin: "author".into(), time: 123,
++            content: vec![ForwardPart::Text { text: text.into() }] }
++    }
++    #[test]
++    fn card_preserves_names_text_time_and_nested_record_structure() {
++        let mut outer = node("<hello> & world");
++        outer.content.push(ForwardPart::Forward { nodes: vec![node("nested")] });
++        let xml = xml("self", &[outer], &mut |_| unreachable!()).unwrap();
++        let wrapped = format!("<msg>{xml}</msg>");
++        let doc = roxmltree::Document::parse(&wrapped).unwrap();
++        let record = doc.descendants().find(|n| n.has_tag_name("recorditem")).unwrap().text().unwrap();
++        let record = roxmltree::Document::parse(record).unwrap();
++        assert_eq!(record.descendants().find(|n| n.has_tag_name("datadesc")).unwrap().text(), Some("<hello> & world"));
++        assert!(record.descendants().any(|n| n.has_tag_name("srcMsgCreateTime") && n.text() == Some("123")));
++        assert!(record.descendants().any(|n| n.has_tag_name("recordxml")));
++    }
++    #[test]
++    fn record_images_and_thumbnails_are_independently_readable_as_fullsize_images() {
++        use wechat_protocol::media::MediaDescriptor;
++        let mut source = Vec::new();
++        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut source, 95)
++            .encode_image(&image::DynamicImage::new_rgb8(320, 240)).unwrap();
++        let (original, _, thumbnail) = crate::media::image_variants(
++            &source, None, None, crate::media::ImageVariantSizing::PreserveOriginal,
++        ).unwrap();
++        assert_eq!(source, original);
++        assert_ne!(original, thumbnail);
++        let mut item = node("caption");
++        item.content.push(ForwardPart::Image { source_id: "source".into() });
++        let mut uploads = Vec::new();
++        let result = xml("self", &[item], &mut |source| {
++            assert_eq!(source, "source");
++            record_image_xml(&original, &thumbnail, "recipient", &mut |prepared| {
++                assert_eq!(prepared.kind.filetype(), 1);
++                assert_eq!(prepared.destination, "recipient");
++                uploads.push(prepared.clone());
++                Ok(UploadedMedia {
++                    descriptor: MediaDescriptor {
++                        file_id: format!("uploaded-{}", uploads.len()),
++                        aes_key: prepared.aes_key.clone(),
++                        quality: prepared.kind,
++                        expected_bytes: Some(u64::from(prepared.plaintext_bytes)),
++                        expected_md5: Some(prepared.md5.clone()), strict_size: true,
++                        expires_at: None,
++                    },
++                    plaintext_bytes: prepared.plaintext_bytes,
++                    md5: prepared.md5.clone(), sha256: prepared.sha256.clone(),
++                    file_name: prepared.file_name.clone(), width: None, height: None,
++                })
++            })
++        }).unwrap();
++        assert_eq!(uploads.len(), 2);
++        assert_ne!(uploads[0].file_key, uploads[1].file_key);
++        assert_ne!(uploads[0].aes_key, uploads[1].aes_key);
++        let wrapped = format!("<msg>{result}</msg>");
++        let outer = roxmltree::Document::parse(&wrapped).unwrap();
++        let record = outer.descendants().find(|n| n.has_tag_name("recorditem")).unwrap().text().unwrap();
++        let record = roxmltree::Document::parse(record).unwrap();
++        let item = record.descendants().find(|n| n.attribute("datatype") == Some("2")).unwrap();
++        let value = |name: &str| item.children().find(|n| n.has_tag_name(name)).unwrap().text().unwrap().to_owned();
++        // Emulate the record reader: exact record field names, filetype 1 for
++        // both objects, then decryption, declared size and digest validation.
++        for (index, prefix, size, digest, head, expected) in [
++            (0, "data", "datasize", "fullmd5", "head256md5", &original),
++            (1, "thumb", "thumbsize", "thumbfullmd5", "thumbhead256md5", &thumbnail),
++        ] {
++            assert_eq!(value(&format!("cdn{prefix}url")), format!("uploaded-{}", index + 1));
++            let encoded_key = value(&format!("cdn{prefix}key"));
++            let key: Vec<u8> = (0..encoded_key.len()).step_by(2)
++                .map(|i| u8::from_str_radix(&encoded_key[i..i + 2], 16).unwrap()).collect();
++            let raw = openssl::symm::decrypt(openssl::symm::Cipher::aes_128_ecb(),
++                &key, None, &uploads[index].encrypted).unwrap();
++            assert_eq!(&raw, expected);
++            assert_eq!(value(size).parse::<usize>().unwrap(), raw.len());
++            assert_eq!(value(digest), hex(&wechat_protocol::crypto::md5(&raw)));
++            assert_eq!(value(head), hex(&wechat_protocol::crypto::md5(&raw[..256])));
++        }
++        assert_eq!(value("thumbwidth"), "160");
++        assert_eq!(value("thumbheight"), "120");
++        assert!(!record.descendants().any(|n| n.has_tag_name("cdn_dataurl")
++            || n.has_tag_name("fullsize") || n.has_tag_name("thumbfullsize")));
++    }
++    #[test]
++    fn failed_record_image_upload_aborts_card_preparation() {
++        let mut thumbnail = Vec::new();
++        image::codecs::jpeg::JpegEncoder::new(&mut thumbnail)
++            .encode_image(&image::DynamicImage::new_rgb8(2, 2)).unwrap();
++        let mut calls = 0;
++        let error = record_image_xml(&thumbnail, &thumbnail, "recipient", &mut |_| {
++            calls += 1;
++            anyhow::bail!("synthetic_upload_rejected")
++        }).unwrap_err();
++        assert_eq!(calls, 1);
++        assert_eq!(error.to_string(), "synthetic_upload_rejected");
++    }
++    #[test]
++    fn rejects_empty_oversized_and_control_character_nodes() {
++        assert!(validate(&[]).is_err());
++        assert!(validate(&[node("bad\0text")]).is_err());
++        assert!(validate(&[node(&"x".repeat(64 * 1024 + 1))]).is_err());
++    }
++}
+diff --git a/packages/native-client-rust/crates/wechat-core/src/lib.rs b/packages/native-client-rust/crates/wechat-core/src/lib.rs
+index 21c7cda..6ef232e 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/lib.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/lib.rs
+@@ -6,6 +6,8 @@ pub mod call_types;
+ pub mod calls;
+ mod format;
+ mod forwarded;
++mod forward_send;
++pub use forward_send::{ForwardNode, ForwardPart};
+ mod links;
+ pub use links::{LinkCard, ShareSendRequest};
+ mod locations;
+diff --git a/packages/native-client-rust/crates/wechat-core/src/links.rs b/packages/native-client-rust/crates/wechat-core/src/links.rs
+index 585415a..35b2e48 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/links.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/links.rs
+@@ -20,11 +20,15 @@ pub enum ShareSendRequest {
+         #[ts(optional)]
+         thumbnail_url: Option<String>,
+     },
++    Forward {
++        #[serde(rename = "threadId")]
++        thread_id: String,
++        nodes: Vec<crate::forward_send::ForwardNode>,
++    },
+ }
+ impl ShareSendRequest {
+     pub fn destination(&self) -> &str {
+-        let Self::Share { thread_id, .. } = self;
+-        thread_id
++        match self { Self::Share { thread_id, .. } | Self::Forward { thread_id, .. } => thread_id }
+     }
+     pub fn validate(&self) -> anyhow::Result<()> {
+         let destination = self.destination();
+@@ -46,7 +50,10 @@ impl ShareSendRequest {
+             description,
+             thumbnail_url,
+             ..
+-        } = self;
++        } = self else {
++            let Self::Forward { nodes, .. } = self else { unreachable!() };
++            return crate::forward_send::xml(sender, nodes, &mut |_| Ok(String::new()));
++        };
+         wechat_protocol::media_send::share_xml(
+             sender,
+             title,
+diff --git a/packages/native-client-rust/crates/wechat-core/src/media.rs b/packages/native-client-rust/crates/wechat-core/src/media.rs
+index b201dd5..d819ccf 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/media.rs
+@@ -116,7 +116,7 @@ struct SendPlan {
+     reuse_completed_upload: Option<CompletedUploadReuse>,
+ }
+ #[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+-enum ImageVariantSizing {
++pub(crate) enum ImageVariantSizing {
+     #[default]
+     Legacy,
+     DownscaleOnly,
+@@ -368,7 +368,7 @@ impl Core {
+             &sealed,
+         )
+     }
+-    fn source_bytes(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
++    pub(crate) fn source_bytes(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
+         let (meta, sealed) = self.store.media_source(account, id)?;
+         let mut opened = self
+             .vault
+@@ -3334,7 +3334,7 @@ impl Core {
+ fn hex_string(bytes: &[u8]) -> String {
+     bytes.iter().map(|b| format!("{b:02x}")).collect()
+ }
+-fn image_variants(
++pub(crate) fn image_variants(
+     bytes: &[u8],
+     standard: Option<Vec<u8>>,
+     thumbnail: Option<Vec<u8>>,
+diff --git a/packages/native-client-rust/crates/wechat-core/src/profile.rs b/packages/native-client-rust/crates/wechat-core/src/profile.rs
+index 73d22df..d47bd6f 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/profile.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/profile.rs
+@@ -332,6 +332,13 @@ pub(crate) fn normalized_message(
+         text = Some(location.body());
+     }
+     let forwarded = crate::quotes::forwarded_body(&msg);
++    let forward_xml = forwarded.as_ref().and_then(|_| {
++        let content = msg.content.text.as_deref()?;
++        (content.len() <= 1024 * 1024).then(|| {
++            msg.sender.as_ref().and_then(|sender| content.strip_prefix(&format!("{sender}:\n")))
++                .unwrap_or(content).to_owned()
++        })
++    });
+     let app_type = (msg.message_type == 49)
+         .then(|| {
+             let stored = msg.local_type.parse::<u64>().unwrap_or(0) >> 32;
+@@ -369,6 +376,7 @@ pub(crate) fn normalized_message(
+             .map(|out| if out { "outgoing" } else { "incoming" })
+     };
+     let mut value = json!({"id":message_id(&msg.id)?,"accountId":account,"threadId":thread,"peerId":thread,"serverId":msg.server_message_id,"senderId":sender,"direction":direction,"type":msg.message_type,"appMessageType":app_type,"quote":quote,"link":link,"body":text,"createdAt":created,"mentions":mentions(msg.source.text.as_deref(),own),"media":[],"version":generation,"projection":"official-profile"});
++    if let Some(xml) = forward_xml { value["forwardXml"] = json!(xml); }
+     if let Some(location) = location {
+         value["location"] = serde_json::to_value(location)?;
+     }
+diff --git a/packages/native-client-rust/crates/wechat-core/src/quotes.rs b/packages/native-client-rust/crates/wechat-core/src/quotes.rs
+index e639182..e5136c8 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/quotes.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/quotes.rs
+@@ -339,6 +339,9 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
+             .map(|(sender, own)| if sender == own { "outgoing" } else { "incoming" }),
+         "appMessageType":card.as_ref().map(|c| c.subtype),
+         "embeddedText":text,"embeddedImage":image});
++    if card.as_ref().is_some_and(|c| c.subtype == 19) {
++        quote["embeddedForwardXml"] = json!(embedded_content(app));
++    }
+     if sticker {
+         quote["embeddedSticker"] = json!(true);
+     }
+diff --git a/packages/native-client-rust/crates/wechat-core/src/runtime.rs b/packages/native-client-rust/crates/wechat-core/src/runtime.rs
+index c832350..e1d36ab 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/runtime.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/runtime.rs
+@@ -1615,7 +1615,11 @@ impl Core {
+                         server_message_id: result.server_message_id,
+                     })
+             } else if let Some(share) = &payload.share {
+-                let xml = share.xml(&state.own_username)?;
++                let xml = if let crate::ShareSendRequest::Forward { nodes, .. } = share {
++                    crate::forward_send::xml(&state.own_username.clone(), nodes, &mut |source_id| {
++                        core.forward_image_xml(&account, &payload.thread_id, source_id, &mut state)
++                    })?
++                } else { share.xml(&state.own_username)? };
+                 native
+                     .send_share(
+                         &mut state,
+diff --git a/packages/native-client-rust/crates/wechat-protocol/Cargo.toml b/packages/native-client-rust/crates/wechat-protocol/Cargo.toml
+index 4d64837..81c32d2 100644
+--- a/packages/native-client-rust/crates/wechat-protocol/Cargo.toml
++++ b/packages/native-client-rust/crates/wechat-protocol/Cargo.toml
+@@ -26,6 +26,7 @@ serde.workspace = true
+ serde_json.workspace = true
+ openssl = { version = "0.10", features = ["vendored"] }
+ flate2 = "1"
++roxmltree = "0.21"
+ base64 = "0.22"
+ hex = "0.4"
+ reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+diff --git a/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs b/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
+index 2101835..6196dfd 100644
+--- a/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
++++ b/packages/native-client-rust/crates/wechat-protocol/src/media_send.rs
+@@ -116,12 +116,20 @@ pub fn share_send_request(
+         created_at > 0 && !content.is_empty() && content.len() <= 256 * 1024,
+         "invalid_share_request"
+     );
++    let wrapped = format!("<msg>{content}</msg>");
++    let doc = roxmltree::Document::parse_with_options(&wrapped, roxmltree::ParsingOptions {
++        allow_dtd: false, nodes_limit: 20000, ..Default::default()
++    })?;
++    let kind = doc.root_element().children().find(|n| n.has_tag_name("appmsg"))
++        .and_then(|app| app.children().find(|n| n.has_tag_name("type")))
++        .and_then(|n| n.text()).and_then(|v| v.parse::<u64>().ok());
++    ensure!(matches!(kind, Some(5 | 19)), "invalid_app_message_type");
+     let app = p::message(&[
+         p::bytes(1, state.own_username.as_bytes()),
+         p::bytes(2, &[]),
+         p::uint(3, 0),
+         p::bytes(4, destination.as_bytes()),
+-        p::uint(5, 5),
++        p::uint(5, kind.unwrap()),
+         p::bytes(6, content.as_bytes()),
+         p::uint(7, created_at as u64),
+         p::bytes(8, client_id.as_bytes()),
+@@ -1290,6 +1298,12 @@ mod tests {
+         let outer = p::decode(&share).unwrap();
+         let app = p::decode(p::data(&outer, 2).unwrap()).unwrap();
+         assert_eq!(p::scalar(&app, 5).unwrap(), 5);
++        let forward_xml = share_xml.replace("<type>5</type>", "<type>19</type>");
++        let forward = share_send_request(&state, "peer", "forward-client", 1234567, &forward_xml).unwrap();
++        let forward_outer = p::decode(&forward).unwrap();
++        let forward_app = p::decode(p::data(&forward_outer, 2).unwrap()).unwrap();
++        assert_eq!(p::scalar(&forward_app, 5).unwrap(), 19);
++        assert_eq!(p::data(&forward_app, 6).unwrap(), forward_xml.as_bytes());
+         assert_eq!(p::data(&app, 4).unwrap(), b"room@chatroom");
+         assert_eq!(p::data(&app, 6).unwrap(), share_xml.as_bytes());
+         assert_eq!(p::scalar(&app, 7).unwrap(), 1234567);
+diff --git a/packages/shared/src/native.generated.ts b/packages/shared/src/native.generated.ts
+index 2cb406c..0878bfb 100644
+--- a/packages/shared/src/native.generated.ts
++++ b/packages/shared/src/native.generated.ts
+@@ -26,12 +26,12 @@ export type CallAudioTrack = { id: number, generation: number, direction: CallTr
+ export type CallEvent = { "type": "hello", protocolVersion: number, clientId: string, capabilities: CallCapabilities, availability: CallsAvailability, currentOffer: CallOffer | null, currentPendingOffer: CallPendingOffer | null, currentCall: CallView | null, audioFormat: CallAudioFormat, } | { "type": "command.result", requestId: string, status: CallCommandStatus, callId: string | null, ownerToken: string | null, code: CallErrorCode | null, } | { "type": "call.offered", offer: CallOffer, } | { "type": "call.pending", offer: CallPendingOffer | null, } | { "type": "call.state", call: CallView, } | { "type": "call.control", callId: string, participantId: string, control: CallControl, } | { "type": "calls.availability", availability: CallsAvailability, } | { "type": "track.added", callId: string, track: CallAudioTrack, } | { "type": "track.updated", callId: string, track: CallAudioTrack, } | { "type": "media.ready", sendTrack: CallAudioTrack, receiveTrack: CallAudioTrack, } | { "type": "call.error", code: CallErrorCode, };
+ export type CallMediaCommand = { "type": "media.attach", clientId: string, ownerToken: string, } | { "type": "audio.start", generation: number, };
+ export type NativeMentions = { state: string, userIds: Array<string>, self: boolean | null, all: boolean | null, source: string | null, };
+-export type NativeQuoteReference = { serverId: string, type: number, state?: string, senderId?: string, direction?: string, appMessageType?: number, embeddedText?: string, embeddedImage?: boolean, embeddedLink?: LinkCard, embeddedSticker?: boolean, };
++export type NativeQuoteReference = { serverId: string, type: number, state?: string, senderId?: string, direction?: string, appMessageType?: number, embeddedText?: string, embeddedForwardXml?: string, embeddedImage?: boolean, embeddedLink?: LinkCard, embeddedSticker?: boolean, };
+ export type LinkCard = { title: string | null, description: string | null, url: string | null, sourceName: string | null, };
+ export type LocationCoordinateSystem = "unknown";
+ export type LocationCard = { latitude: number, longitude: number, name: string | null, address: string | null, scale: number | null, mapType: string | null, poiId: string | null, coordinateSystem: LocationCoordinateSystem, };
+ export type NativeRecallInfo = { observedAt: string, recalledAt?: string, replacementText?: string | null, };
+-export type NativeMessage = { id: string, accountId: string, threadId: string, serverId: string | null, senderId: string | null, type: number, appMessageType?: number, quote?: NativeQuoteReference, link?: LinkCard, location?: LocationCard, recall?: NativeRecallInfo, direction: string | null, body: string | null, createdAt: string | null, mentions: NativeMentions, version: string, media: unknown[], };
++export type NativeMessage = { id: string, accountId: string, threadId: string, serverId: string | null, senderId: string | null, type: number, appMessageType?: number, quote?: NativeQuoteReference, forwardXml?: string, link?: LinkCard, location?: LocationCard, recall?: NativeRecallInfo, direction: string | null, body: string | null, createdAt: string | null, mentions: NativeMentions, version: string, media: unknown[], };
+ export type PeerCategory = "unknown" | "system" | "group" | "business" | "openim" | "openim_customer_service";
+ export type PeerNamespace = "wechat" | "openim" | "openim_customer_service" | "im_chatroom" | "qy" | "weclaw" | "other";
+ export type PeerBusinessKind = "official_account" | "service_account" | "enterprise" | "enterprise_child" | "photo_account";
+@@ -67,7 +67,9 @@ export type QuoteSendReference = { messageId: string, serverId: string, };
+ export type TextMentionPosition = { start: number, end: number, index: number, };
+ export type TextMentions = { userIds?: Array<string>, all?: boolean, positions?: Array<TextMentionPosition>, };
+ export type NativeTextSendRequest = { threadId: string, text: string, quote?: QuoteSendReference, mentions?: TextMentions, };
+-export type ShareSendRequest = { "kind": "share", threadId: string, title: string, url: string, description?: string, thumbnailUrl?: string, };
++export type ShareSendRequest = { "kind": "share", threadId: string, title: string, url: string, description?: string, thumbnailUrl?: string, } | { "kind": "forward", threadId: string, nodes: Array<ForwardNode>, };
++export type ForwardNode = { name: string, uin: string, time: number, content: Array<ForwardPart>, };
++export type ForwardPart = { "type": "text", text: string, } | { "type": "image", sourceId: string, } | { "type": "forward", nodes: Array<ForwardNode>, };
+ export type NativeRecallRequest = { serverId: string, };
+ export type NativeReadRequest = { expectedVersion: string, };
+ export type NativeForgetRequest = { confirm: boolean, };
