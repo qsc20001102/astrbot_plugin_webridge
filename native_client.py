@@ -2030,8 +2030,12 @@ class NativeClient:
                 failed_result = value.get("result")
                 if not isinstance(failed_result, dict):
                     failed_result = {}
+                # The public job view exposes the failure code as `reason`.
                 error_code = (
-                    value.get("errorCode") or value.get("error_code") or "-"
+                    value.get("reason")
+                    or value.get("errorCode")
+                    or value.get("error_code")
+                    or "-"
                 )
                 cdn_failure = failed_result.get("cdnDownloadFailure")
                 if isinstance(cdn_failure, dict):

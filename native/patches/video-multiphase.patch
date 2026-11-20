@@ -266,10 +266,52 @@ index 9e80ab8..376f2ff 100644
      fn standalone_original_video_uses_type_four_without_thumbnail() {
          let mut raw = prepared().clone();
 diff --git a/packages/native-client-rust/crates/wechat-protocol/src/media.rs b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
-index 3cb44da..12a87c9 100644
+index 3cb44da..3c0ba49 100644
 --- a/packages/native-client-rust/crates/wechat-protocol/src/media.rs
 +++ b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
-@@ -807,56 +807,71 @@ impl fmt::Display for LargeFileDownloadError {
+@@ -15,6 +15,10 @@ use zeroize::Zeroize;
+ pub type CdnFields = BTreeMap<String, Vec<u8>>;
+ const MAX_CDN_BODY: usize = 2 * 1024 * 1024;
+ const UPLOAD_CHUNK: usize = 65536;
++// Range downloads are idempotent, so a dropped request or a reply that only
++// reports a back-to-origin fetch is retried before the job is failed.
++const DOWNLOAD_ATTEMPTS: u32 = 3;
++const DOWNLOAD_RETRY_DELAY: Duration = Duration::from_millis(400);
+ pub const MAX_CDN_TRANSFER_BYTES: usize = 25 * 1024 * 1024;
+ pub const MAX_NATIVE_UPLOAD_BYTES: usize = 25 * 1024 * 1024 - 17;
+ pub const MAX_LARGE_FILE_BYTES: usize = wechat_media::MAX_FILE_BYTES;
+@@ -619,7 +623,29 @@ impl CdnClient {
+             }
+             fields.insert("wxmsgflag".into(), vec![]);
+             fields.insert("fileid".into(), descriptor.file_id.as_bytes().to_vec());
+-            let reply = post(if large { "/downloadbig" } else { "/download" }, &fields)?;
++            let path = if large { "/downloadbig" } else { "/download" };
++            let mut attempt = 0u32;
++            let reply = loop {
++                attempt += 1;
++                let reply = match post(path, &fields) {
++                    Ok(reply) => reply,
++                    Err(error) => {
++                        if attempt >= DOWNLOAD_ATTEMPTS {
++                            return Err(error);
++                        }
++                        std::thread::sleep(DOWNLOAD_RETRY_DELAY * attempt);
++                        continue;
++                    }
++                };
++                // A fresh object may answer with only a back-to-origin counter
++                // before the edge can serve the range, so ask again.
++                let pending =
++                    matches!(integer(&reply, "retcode"), Ok(0)) && !reply.contains_key("filedata");
++                if !pending || attempt >= DOWNLOAD_ATTEMPTS {
++                    break reply;
++                }
++                std::thread::sleep(DOWNLOAD_RETRY_DELAY * attempt);
++            };
+             let code = integer(&reply, "retcode")?;
+             ensure!(code == 0, "CDN download returned {code}");
+             if strict_transfer || reply.contains_key("seq") {
+@@ -807,56 +833,71 @@ impl fmt::Display for LargeFileDownloadError {
      }
  }
  impl std::error::Error for LargeFileDownloadError {}
@@ -384,7 +426,7 @@ index 3cb44da..12a87c9 100644
          }
      }
      // Linux 4.1.13.26's normal pipeline response map discards `istrans`.
-@@ -868,17 +883,20 @@ fn validate_large_video_download_reply(
+@@ -868,17 +909,20 @@ fn validate_large_video_download_reply(
      for (key, observed) in [("istrans", 999), ("videoformat", 1)] {
          if reply.contains_key(key) {
              let value = integer(reply, key)?;
@@ -413,7 +455,7 @@ index 3cb44da..12a87c9 100644
      }
      if reply.contains_key("rawfilesize") {
          ensure!(
-@@ -1017,27 +1035,25 @@ fn escaped_component(s: &str) -> String {
+@@ -1017,27 +1061,25 @@ fn escaped_component(s: &str) -> String {
          })
          .collect()
  }
@@ -452,7 +494,7 @@ index 3cb44da..12a87c9 100644
          ("thumbtotalsize", 0),
          ("rawthumbsize", 0),
          ("encthumbcrc", 0),
-@@ -1045,21 +1061,96 @@ fn upload_fields(
+@@ -1045,21 +1087,96 @@ fn upload_fields(
          ("rangestart", start as u64),
          ("rangeend", end as u64),
      ] {
@@ -560,7 +602,7 @@ index 3cb44da..12a87c9 100644
  }
  fn validate_upload_reply(
      reply: &CdnFields,
-@@ -1290,6 +1381,31 @@ impl PreparedImageUpload {
+@@ -1290,6 +1407,31 @@ impl PreparedImageUpload {
      }
  }
  impl PreparedVideoUpload {
@@ -592,7 +634,7 @@ index 3cb44da..12a87c9 100644
      pub fn with_material(
          video: &[u8],
          thumbnail: &[u8],
-@@ -1468,6 +1584,62 @@ impl CdnClient {
+@@ -1468,6 +1610,62 @@ impl CdnClient {
      ) -> Result<UploadedVideo> {
          self.upload_video_with_transport(p, progress, |path, fields| self.post(path, fields))
      }
@@ -655,7 +697,7 @@ index 3cb44da..12a87c9 100644
      fn upload_video_with_transport(
          &self,
          p: &PreparedVideoUpload,
-@@ -1479,6 +1651,12 @@ impl CdnClient {
+@@ -1479,6 +1677,12 @@ impl CdnClient {
              p.video.kind == MediaQuality::Video,
              "Invalid normal video upload profile"
          );
@@ -668,7 +710,7 @@ index 3cb44da..12a87c9 100644
          p.thumbnail.validate(&p.video.aes_key)?;
          ensure!(
              p.thumbnail.width <= 320 && p.thumbnail.height <= 320,
-@@ -1626,7 +1804,7 @@ mod tests {
+@@ -1626,7 +1830,7 @@ mod tests {
      }
  
      #[test]
@@ -677,7 +719,7 @@ index 3cb44da..12a87c9 100644
          let (mut descriptor, _, ciphertext) = download_fixture(16, MediaQuality::Video);
          descriptor.expected_bytes = Some(MAX_CDN_TRANSFER_BYTES as u64 + 1);
          let fields = BTreeMap::from([
-@@ -1637,25 +1815,42 @@ mod tests {
+@@ -1637,25 +1841,42 @@ mod tests {
              ("fileid".into(), descriptor.file_id.as_bytes().to_vec()),
          ]);
          let valid = download_reply(&fields, &descriptor, &ciphertext);
@@ -730,7 +772,39 @@ index 3cb44da..12a87c9 100644
          }
          for (size, checksum) in [
              (
-@@ -2317,7 +2512,7 @@ mod tests {
+@@ -2144,7 +2365,30 @@ mod tests {
+                 }
+             )
+             .is_err());
+-        assert_eq!(requests, 1);
++        // An idempotent range request is retried a bounded number of times.
++        assert_eq!(requests, DOWNLOAD_ATTEMPTS);
++    }
++    #[test]
++    fn pending_back_to_origin_reply_is_retried_for_the_same_range() {
++        let (descriptor, raw, ciphertext) = download_fixture(1024, MediaQuality::LargeFile);
++        let mut requests = 0;
++        let downloaded = client()
++            .download_with_transport(
++                &descriptor,
++                |_, _| Ok(()),
++                |_, fields| {
++                    requests += 1;
++                    let mut reply = download_reply(fields, &descriptor, &ciphertext);
++                    if requests == 1 {
++                        reply.remove("filedata");
++                        put(&mut reply, "backsrcnum", 1);
++                    }
++                    Ok(reply)
++                },
++            )
++            .unwrap();
++        assert_eq!(requests, 2);
++        assert_eq!(downloaded.bytes, raw);
+     }
+     #[test]
+     fn normal_download_keeps_optional_sequence_and_original_limits() {
+@@ -2317,7 +2561,7 @@ mod tests {
      }
  
      #[test]
@@ -739,7 +813,7 @@ index 3cb44da..12a87c9 100644
          let mut video = b"\0\0\0\x0cftypisom".to_vec();
          video.resize(51 * 1024 * 1024, 0x37);
          let mut thumbnail = Vec::new();
-@@ -2333,40 +2528,146 @@ mod tests {
+@@ -2333,40 +2577,146 @@ mod tests {
              "00112233445566778899aabbccddeeff",
          )
          .unwrap();
