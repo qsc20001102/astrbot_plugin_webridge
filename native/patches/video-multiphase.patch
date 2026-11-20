@@ -198,7 +198,7 @@ index 9e80ab8..376f2ff 100644
      fn standalone_original_video_uses_type_four_without_thumbnail() {
          let mut raw = prepared().clone();
 diff --git a/packages/native-client-rust/crates/wechat-protocol/src/media.rs b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
-index 3cb44da..0153640 100644
+index 3cb44da..8fad0e7 100644
 --- a/packages/native-client-rust/crates/wechat-protocol/src/media.rs
 +++ b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
 @@ -1017,27 +1017,25 @@ fn escaped_component(s: &str) -> String {
@@ -419,7 +419,7 @@ index 3cb44da..0153640 100644
 +        let total = p.thumbnail.encrypted.len();
 +        // A 320 px JPEG thumbnail stays inside one small-object request.
 +        ensure!(
-+            !total.is_empty() && total < MAX_CDN_TRANSFER_BYTES,
++            total > 0 && total < MAX_CDN_TRANSFER_BYTES,
 +            "Video thumbnail requires multiphase upload"
 +        );
 +        // The thumbnail is a small side object: report its bytes without a total
