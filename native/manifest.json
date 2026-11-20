@@ -3,7 +3,7 @@
   "target": "x86_64-unknown-linux-gnu",
   "upstream_commit": "39af1eec84f4763e1257406f8c5fb848b31d82e9",
   "image_original": true,
-  "sha256": "28955089136b251513df648e48585b4912c9ed1bc67866f82a90e2484c5e6bb0",
+  "sha256": "f5e4a6652101288a1445df93cbcc88e817aa4e7089c0a447b63d8c27768e0dbc",
   "patch_sha256": "b91a01a4322245c8d22a511b1a818dd1d16cf803186d89ce64c8ddddacb8b2ea",
   "minimum_glibc": "2.36",
   "rustc": "1.93.1",
@@ -14,5 +14,7 @@
   "merged_forward": true,
   "forward_projection": "xml-v1",
   "temporary_media_sources": true,
-  "media_lifecycle_patch_sha256": "ad6c1eed20c1ff85c2d9e519851835152b46a3507482686f9ab348699dc608ca"
+  "media_lifecycle_patch_sha256": "ad6c1eed20c1ff85c2d9e519851835152b46a3507482686f9ab348699dc608ca",
+  "video_multiphase": true,
+  "video_multiphase_patch_sha256": "c06888f501bbcd55e1320005aeceaeabc912fdb4b2f48046dea1e37fe58ff631"
 }
