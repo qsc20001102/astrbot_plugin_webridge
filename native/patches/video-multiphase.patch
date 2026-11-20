@@ -266,10 +266,10 @@ index 9e80ab8..376f2ff 100644
      fn standalone_original_video_uses_type_four_without_thumbnail() {
          let mut raw = prepared().clone();
 diff --git a/packages/native-client-rust/crates/wechat-protocol/src/media.rs b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
-index 3cb44da..374b27a 100644
+index 3cb44da..12a87c9 100644
 --- a/packages/native-client-rust/crates/wechat-protocol/src/media.rs
 +++ b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
-@@ -807,43 +807,57 @@ impl fmt::Display for LargeFileDownloadError {
+@@ -807,56 +807,71 @@ impl fmt::Display for LargeFileDownloadError {
      }
  }
  impl std::error::Error for LargeFileDownloadError {}
@@ -347,6 +347,14 @@ index 3cb44da..374b27a 100644
 -        integer(reply, "ver")? == 0,
 -        "Unsupported large-video download version"
 -    );
+-    for key in [
+-        "retrysec",
+-        "isretry",
+-        "isoverload",
+-        "isgetcdn",
+-        "backsrcnum",
+-        "rsppicformat",
+-    ] {
 +    // The observed endpoint answers ver=0; it also echoes the request's
 +    // protocol version in some replies.
 +    if reply.contains_key("ver") {
@@ -355,12 +363,11 @@ index 3cb44da..374b27a 100644
 +            return Err(LargeVideoDownloadError::Version { actual: version }.into());
 +        }
 +    }
-     for key in [
-         "retrysec",
-         "isretry",
-@@ -853,10 +867,14 @@ fn validate_large_video_download_reply(
-         "rsppicformat",
-     ] {
++    // `backsrcnum` counts how often the edge had to pull the object from origin.
++    // A freshly uploaded object always reports at least one back-to-origin fetch,
++    // so it is informational here (the file-type readback ignores it too) and the
++    // payload checks below decide whether the reply actually carries the range.
++    for key in ["retrysec", "isretry", "isoverload", "isgetcdn", "rsppicformat"] {
          if reply.contains_key(key) {
 -            ensure!(
 -                integer(reply, key)? == 0,
@@ -377,7 +384,7 @@ index 3cb44da..374b27a 100644
          }
      }
      // Linux 4.1.13.26's normal pipeline response map discards `istrans`.
-@@ -868,17 +886,20 @@ fn validate_large_video_download_reply(
+@@ -868,17 +883,20 @@ fn validate_large_video_download_reply(
      for (key, observed) in [("istrans", 999), ("videoformat", 1)] {
          if reply.contains_key(key) {
              let value = integer(reply, key)?;
@@ -406,7 +413,7 @@ index 3cb44da..374b27a 100644
      }
      if reply.contains_key("rawfilesize") {
          ensure!(
-@@ -1017,27 +1038,25 @@ fn escaped_component(s: &str) -> String {
+@@ -1017,27 +1035,25 @@ fn escaped_component(s: &str) -> String {
          })
          .collect()
  }
@@ -445,7 +452,7 @@ index 3cb44da..374b27a 100644
          ("thumbtotalsize", 0),
          ("rawthumbsize", 0),
          ("encthumbcrc", 0),
-@@ -1045,21 +1064,96 @@ fn upload_fields(
+@@ -1045,21 +1061,96 @@ fn upload_fields(
          ("rangestart", start as u64),
          ("rangeend", end as u64),
      ] {
@@ -553,7 +560,7 @@ index 3cb44da..374b27a 100644
  }
  fn validate_upload_reply(
      reply: &CdnFields,
-@@ -1290,6 +1384,31 @@ impl PreparedImageUpload {
+@@ -1290,6 +1381,31 @@ impl PreparedImageUpload {
      }
  }
  impl PreparedVideoUpload {
@@ -585,7 +592,7 @@ index 3cb44da..374b27a 100644
      pub fn with_material(
          video: &[u8],
          thumbnail: &[u8],
-@@ -1468,6 +1587,62 @@ impl CdnClient {
+@@ -1468,6 +1584,62 @@ impl CdnClient {
      ) -> Result<UploadedVideo> {
          self.upload_video_with_transport(p, progress, |path, fields| self.post(path, fields))
      }
@@ -648,7 +655,7 @@ index 3cb44da..374b27a 100644
      fn upload_video_with_transport(
          &self,
          p: &PreparedVideoUpload,
-@@ -1479,6 +1654,12 @@ impl CdnClient {
+@@ -1479,6 +1651,12 @@ impl CdnClient {
              p.video.kind == MediaQuality::Video,
              "Invalid normal video upload profile"
          );
@@ -661,7 +668,7 @@ index 3cb44da..374b27a 100644
          p.thumbnail.validate(&p.video.aes_key)?;
          ensure!(
              p.thumbnail.width <= 320 && p.thumbnail.height <= 320,
-@@ -1626,7 +1807,7 @@ mod tests {
+@@ -1626,7 +1804,7 @@ mod tests {
      }
  
      #[test]
@@ -670,7 +677,7 @@ index 3cb44da..374b27a 100644
          let (mut descriptor, _, ciphertext) = download_fixture(16, MediaQuality::Video);
          descriptor.expected_bytes = Some(MAX_CDN_TRANSFER_BYTES as u64 + 1);
          let fields = BTreeMap::from([
-@@ -1637,25 +1818,41 @@ mod tests {
+@@ -1637,25 +1815,42 @@ mod tests {
              ("fileid".into(), descriptor.file_id.as_bytes().to_vec()),
          ]);
          let valid = download_reply(&fields, &descriptor, &ciphertext);
@@ -689,6 +696,7 @@ index 3cb44da..374b27a 100644
 -            ("rawfilesize", "1"),
 -            ("rawfilemd5", "00000000000000000000000000000000"),
 +            ("ver", "1"),
++            ("backsrcnum", "1"),
 +        ] {
 +            let mut reply = valid.clone();
 +            reply.insert(key.into(), value.as_bytes().to_vec());
@@ -722,7 +730,7 @@ index 3cb44da..374b27a 100644
          }
          for (size, checksum) in [
              (
-@@ -2317,7 +2514,7 @@ mod tests {
+@@ -2317,7 +2512,7 @@ mod tests {
      }
  
      #[test]
@@ -731,7 +739,7 @@ index 3cb44da..374b27a 100644
          let mut video = b"\0\0\0\x0cftypisom".to_vec();
          video.resize(51 * 1024 * 1024, 0x37);
          let mut thumbnail = Vec::new();
-@@ -2333,40 +2530,146 @@ mod tests {
+@@ -2333,40 +2528,146 @@ mod tests {
              "00112233445566778899aabbccddeeff",
          )
          .unwrap();
