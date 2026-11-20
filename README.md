@@ -4,7 +4,7 @@
 
 微信消息适配器将个人微信接入 AstrBot，内置 Native 引擎，在插件界面扫码登录并一键创建消息平台。微信管理使用账号列表与登录、接入工作区，支持浅色、深色及手机布局；旧的 connection 页面及接口已移除。只负责消息收发，唤醒、白名单、模型和业务插件使用 AstrBot 配置。
 
-**版本 1.1.2 · AstrBot v4.29.4 · Linux x86_64（amd64）· Python 3.12+ · glibc 2.36+**。
+**版本 1.1.4 · AstrBot v4.29.4 · Linux x86_64（amd64）· Python 3.12+ · glibc 2.36+**。
 
 独立维护仓库：[qsc20001102/astrbot_plugin_webridge](https://github.com/qsc20001102/astrbot_plugin_webridge)。仓库自带运行所需引擎，可以直接安装仓库或压缩本目录安装。
 
@@ -40,6 +40,8 @@ Docker 部署建议在 Linux 使用 `network_mode: host`，有些手机确认需
 机器人仍以视频消息发送结果。取消原先的 50 MiB 来源限制、约 25 MiB 播放副本限制，以及为了满足体积而降低码率的策略。兼容的 H.264/AAC MP4 保留源字节；其他 MOV 家族编码按来源尺寸与帧率做兼容转换，不统一缩到 1080p 或 60 帧。
 
 微信服务端、传输字段和部署资源仍有实际边界，不能承诺任意大小都能被微信接收。详见[视频说明](docs/video-quality.md)。
+
+发送前有一层可选的本地处理：默认 `transcode=false`，Python **不转码、不缩放、不降帧**，源文件原样交给引擎，画质与旧版一致，但也不会带来本地转码加速。只有显式开启 `transcode=true` 才会本地重编码；其默认参数保持来源分辨率/帧率并使用 CRF 18，速度档（1280 长边/30 fps/CRF 23）需要再显式配置。参数在“插件管理 → 微信消息适配器 → 配置 → 视频发送”里修改，也可用 `WEBRIDGE_VIDEO_*` 环境变量覆盖；原因、实测数据和排查步骤见[视频发送排查](docs/video-troubleshooting.md)。
 
 ## AstrBot 行为配置
 
@@ -94,4 +96,4 @@ Docker 部署建议在 Linux 使用 `network_mode: host`，有些手机确认需
 
 本项目独立维护，沿用上游 MIT 许可与署名；内置引擎的各项许可和来源见 `native/licenses/` 与 `native/README.md`。
 
-[安装说明](docs/setup.md) · [架构](docs/architecture.md) · [运维](docs/operations.md)
+[安装说明](docs/setup.md) · [架构](docs/architecture.md) · [运维](docs/operations.md) · [视频排查](docs/video-troubleshooting.md)

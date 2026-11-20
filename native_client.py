@@ -31,6 +31,7 @@ from .config import (
     VOICE_SEND_TIMEOUT,
 )
 from .state import cursor_number
+from .video import VideoPolicy, normalize_video, normalize_video_path
 
 _SAFE_CODES = {
     "operation_in_progress",
@@ -303,6 +304,77 @@ def validate_video_bytes(data: bytes, *, max_bytes: int = VIDEO_PROTOCOL_MAX_BYT
     return content_type
 
 
+def validate_video_file(
+    path: Path, *, max_bytes: int = VIDEO_PROTOCOL_MAX_BYTES
+) -> str:
+    """Validate a MOV-family file by seeking over boxes, not by reading mdat."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        raise MediaError("unavailable", media_kind="video") from None
+    if size <= 0:
+        raise MediaError("unavailable", media_kind="video")
+    if size > max_bytes:
+        raise MediaError("too_large", media_kind="video")
+    offset = boxes = 0
+    movie = media = file_type = False
+    content_type = "video/quicktime"
+    try:
+        with path.open("rb") as stream:
+            while offset < size:
+                boxes += 1
+                if boxes > 65536 or size - offset < 8:
+                    raise MediaError("unsupported_format", media_kind="video")
+                stream.seek(offset)
+                header = stream.read(16)
+                if len(header) < 8:
+                    raise MediaError("unsupported_format", media_kind="video")
+                box_size = int.from_bytes(header[0:4], "big")
+                header_len = 8
+                if box_size == 0:
+                    box_size = size - offset
+                elif box_size == 1:
+                    if len(header) < 16:
+                        raise MediaError("unsupported_format", media_kind="video")
+                    box_size = int.from_bytes(header[8:16], "big")
+                    header_len = 16
+                if box_size < header_len or box_size > size - offset:
+                    raise MediaError("unsupported_format", media_kind="video")
+                kind = header[4:8]
+                if kind == b"ftyp":
+                    if (
+                        file_type
+                        or box_size < header_len + 8
+                        or (box_size - header_len) % 4
+                    ):
+                        raise MediaError("unsupported_format", media_kind="video")
+                    file_type = True
+                    stream.seek(offset + header_len)
+                    brand = stream.read(4)
+                    if len(brand) != 4:
+                        raise MediaError("unsupported_format", media_kind="video")
+                    if brand == b"qt  ":
+                        content_type = "video/quicktime"
+                    elif brand.startswith(b"3g2"):
+                        content_type = "video/3gpp2"
+                    elif brand.startswith(b"3g"):
+                        content_type = "video/3gpp"
+                    elif brand in {b"mjp2", b"mj2s"}:
+                        content_type = "video/mj2"
+                    else:
+                        content_type = "video/mp4"
+                elif kind == b"moov":
+                    movie = box_size > header_len
+                elif kind == b"mdat":
+                    media |= box_size > header_len
+                offset += box_size
+    except OSError:
+        raise MediaError("unavailable", media_kind="video") from None
+    if not movie or not media:
+        raise MediaError("unsupported_format", media_kind="video")
+    return content_type
+
+
 def _jpeg_has_end_marker(data: bytes | bytearray) -> bool:
     """Walk JPEG framing; metadata may contain EOI bytes and a photo may have a trailer."""
     position = 2
@@ -499,10 +571,29 @@ async def load_outgoing_image(image) -> tuple[bytes, str]:
     return await _load_outgoing_media(image.url or image.file or image.path, kind="image")
 
 
-async def load_outgoing_video(video) -> tuple[bytes, str]:
+async def load_outgoing_video(
+    video, *, policy: VideoPolicy | None = None
+) -> tuple[bytes, str]:
     # _resolve_file_source does no downloading. Keep our credential-free
     # URL reader instead of Video.convert_to_file_path's general downloader.
-    return await _load_outgoing_media(await video._resolve_file_source(), kind="video")
+    source = await video._resolve_file_source()
+    if policy is not None and policy.transcode:
+        local = await asyncio.to_thread(_local_media_path, source)
+        if local is not None:
+            try:
+                # Seek over mdat instead of loading the source into memory.
+                content_type = await asyncio.to_thread(validate_video_file, local)
+            except MediaError as error:
+                raise ValueError(f"发送视频校验失败：{error.reason}") from None
+            normalized = await normalize_video_path(local, content_type, policy)
+            if normalized is not None:
+                return normalized
+    data, content_type = await _load_outgoing_media(source, kind="video")
+    if policy is not None:
+        # Normalize locally before the engine encodes at CRF 18 and uploads the
+        # playback copy to the WeChat CDN in 64 KiB chunks.
+        data, content_type = await normalize_video(bytes(data), content_type, policy)
+    return data, content_type
 
 
 async def load_outgoing_voice(record) -> tuple[bytes, str]:
@@ -524,6 +615,38 @@ async def load_outgoing_voice(record) -> tuple[bytes, str]:
     return await _load_outgoing_media(
         source or record.file or record.url or record.path, kind="voice"
     )
+
+
+def _local_media_path(source) -> Path | None:
+    """Return a local file for the path-based fast path, or ``None``.
+
+    URL, data URI and bare-base64 sources keep the existing reader. The checks
+    mirror ``_load_outgoing_media`` so a path is never treated differently from
+    the generic loader.
+    """
+    if not isinstance(source, str) or not source:
+        return None
+    lowered = source.lower()
+    if lowered.startswith(("http:", "https:", "base64://", "data:")):
+        return None
+    if lowered.startswith("file:"):
+        uri = urlsplit(source)
+        if uri.netloc or uri.query or uri.fragment:
+            raise ValueError("不支持网络媒体路径")
+        source = url2pathname(uri.path)
+    elif "://" in source:
+        raise ValueError("媒体 URL 只支持 HTTP(S)")
+    if source.startswith(("\\\\", "//")):
+        raise ValueError("不支持网络媒体路径")
+    if len(source) >= 4096:
+        return None  # Long bare base64, not a path.
+    try:
+        path = Path(source)
+        if path.is_file():
+            return path
+    except OSError:
+        pass
+    return None
 
 
 async def _load_outgoing_media(source, *, kind: str) -> tuple[bytes, str]:
@@ -605,6 +728,57 @@ def _read_media_file(path: Path, max_bytes: int) -> bytes:
         raise ValueError(f"发送媒体超过大小限制 ({max_bytes} bytes)")
     with path.open("rb") as stream:
         return stream.read(max_bytes + 1)
+
+
+def _progress_text(value) -> str:
+    if type(value) is not int or value < 0:
+        return "-"
+    if value >= 1048576:
+        return f"{value / 1048576:.1f}MiB"
+    if value >= 1024:
+        return f"{value / 1024:.0f}KiB"
+    return f"{value}B"
+
+
+def _accepted_media_action(value: dict, kind: str, voice_chunks: list) -> str:
+    """Classify an accepted media job without performing I/O.
+
+    Returns ``complete`` (all receipts present), ``accepted`` (server accepted,
+    local projection missing; fine for image/video), ``wait`` (accepted but no
+    server id yet) or ``review`` (cannot trust the result).
+    """
+    result = value.get("result")
+    if not isinstance(result, dict):
+        result = {}
+    profile = result.get("profileProjection")
+    if profile == "unknown":
+        return "review"
+    ids = result.get("messageIds")
+    if kind == "voice":
+        if profile == "not_applicable" or any(
+            c["state"] in {"rejected", "needs_review"} for c in voice_chunks
+        ):
+            return "review"
+        complete = (
+            bool(voice_chunks)
+            and isinstance(ids, list)
+            and len(ids) == len(voice_chunks)
+            and all(isinstance(item, str) and item for item in ids)
+            and len(set(ids)) == len(ids)
+            and all(chunk["state"] == "accepted" for chunk in voice_chunks)
+            and value.get("serverMessageId") == voice_chunks[-1]["serverMessageId"]
+        )
+        return "complete" if complete else "wait"
+    server_id = value.get("serverMessageId")
+    if not (isinstance(server_id, str) and server_id):
+        return "wait"
+    valid_ids = (
+        isinstance(ids, list)
+        and len(ids) == 1
+        and isinstance(ids[0], str)
+        and bool(ids[0])
+    )
+    return "complete" if valid_ids else "accepted"
 
 
 async def _download_public_media(url: str, *, max_bytes: int, read_budget: float = 15) -> bytes:
@@ -719,6 +893,8 @@ class NativeClient:
         self.video_timeout = video_timeout
         self.idle_timeout = idle_timeout
         self._session: aiohttp.ClientSession | None = None
+        self._caps_cache: dict | None = None
+        self._caps_at = 0.0
 
     async def __aenter__(self):
         await self.open()
@@ -743,6 +919,7 @@ class NativeClient:
     async def close(self):
         if self._session:
             await self._session.close()
+        self._caps_cache = None
 
     async def _read_json(self, response) -> dict:
         data = bytearray()
@@ -803,7 +980,13 @@ class NativeClient:
         return await self._request("GET", self.prefix)
 
     async def capabilities(self):
-        return await self._request("GET", self.prefix + "/capabilities")
+        # Limits are stable per account; avoid a GET for every video send.
+        now = asyncio.get_running_loop().time()
+        if self._caps_cache is not None and now - self._caps_at < 300:
+            return self._caps_cache
+        value = await self._request("GET", self.prefix + "/capabilities")
+        self._caps_cache, self._caps_at = value, now
+        return value
 
     async def message(self, message_id: str):
         return await self._request("GET", self.prefix + "/messages/" + quote(message_id, safe=""))
@@ -1554,6 +1737,7 @@ class NativeClient:
     ) -> dict:
         if validate_video_bytes(data) != content_type:
             raise ValueError("发送视频 MIME 与内容不匹配")
+        digest = hashlib.sha256(data).hexdigest()
         caps = await self.capabilities()
         limits = caps.get("mediaSendMaxBytes")
         limit = limits.get("video") if isinstance(limits, dict) else None
@@ -1567,6 +1751,12 @@ class NativeClient:
             raise ValueError("Native 未提供视频发送能力，请检查服务版本和账号权限")
         if len(data) > min(limit, upload_limit):
             raise ValueError("视频超过 Native 服务允许的大小，未上传或发送")
+        logger.info(
+            "微信消息适配器 视频能力：send_max=%s upload_max=%s source_bytes=%s",
+            limit,
+            upload_limit,
+            len(data),
+        )
         suffix = {
             "video/quicktime": "mov",
             "video/3gpp": "3gp",
@@ -1582,12 +1772,13 @@ class NativeClient:
             filename="video." + suffix,
             record_job=record_job,
             before_send=before_send,
+            sha256_hex=digest,
         )
         result = receipt.get("result")
         prepared = result.get("videoPreparation") if isinstance(result, dict) else None
         if (
             isinstance(prepared, dict)
-            and prepared.get("sourceSha256") == hashlib.sha256(data).hexdigest()
+            and prepared.get("sourceSha256") == digest
             and type(prepared.get("sourcePreserved")) is bool
             and type(prepared.get("normalBytes")) is int
             and 0 < prepared["normalBytes"] <= VIDEO_PROTOCOL_MAX_BYTES
@@ -1643,6 +1834,16 @@ class NativeClient:
             record_chunks=record_chunks,
         )
 
+    def _media_poll_delay(self, elapsed: float) -> float:
+        """Back off long media jobs; a video can run for many minutes."""
+        if elapsed < 10:
+            return self.poll_interval
+        if elapsed < 30:
+            return max(self.poll_interval, 0.5)
+        if elapsed < 120:
+            return max(self.poll_interval, 1.0)
+        return max(self.poll_interval, 2.0)
+
     async def _send_media(
         self,
         thread: str,
@@ -1655,26 +1856,44 @@ class NativeClient:
         record_job: Callable[[str], None],
         before_send: Callable[[], Awaitable[None]],
         record_chunks=None,
+        sha256_hex: str | None = None,
     ) -> dict:
         """Share upload, idempotent submission and job polling for supported media."""
+        started = asyncio.get_running_loop().time()
         form = aiohttp.FormData()
         form.add_field("file", data, filename=filename, content_type=content_type)
-        options = (
-            {
-                "timeout": aiohttp.ClientTimeout(total=self.video_timeout),
+        options = {}
+        if kind == "video":
+            # The upload is local, but a management network or a busy engine can
+            # still take minutes for a large source. Scale the budget with size
+            # instead of failing a valid send at a flat 180 s.
+            upload_budget = max(
+                self.video_timeout, min(1800.0, 60.0 + len(data) / 1048576 * 3)
+            )
+            options = {
+                "timeout": aiohttp.ClientTimeout(total=upload_budget),
                 "params": {"temporary": "true"},
             }
-            if kind == "video"
-            else {}
-        )
+            logger.info(
+                "微信消息适配器 视频开始上传到 Native：bytes=%s timeout=%.0fs",
+                len(data),
+                upload_budget,
+            )
         source = await self._request("POST", self.prefix + "/uploads", data=form, **options)
         if (
             not isinstance(source.get("id"), str)
             or not source["id"]
             or source.get("byteLength") != len(data)
-            or source.get("sha256") != hashlib.sha256(data).hexdigest()
+            or source.get("sha256") != (sha256_hex or hashlib.sha256(data).hexdigest())
         ):
             raise SendError("upload_identity_mismatch", key)
+        if kind == "video":
+            logger.info(
+                "微信消息适配器 视频已上传到 Native：source_id=%s bytes=%s elapsed=%.1fs",
+                source["id"],
+                len(data),
+                asyncio.get_running_loop().time() - started,
+            )
         await before_send()
         value = await self._submit_send(
             {"threadId": thread, "kind": kind, "sourceId": source["id"]}, key
@@ -1689,6 +1908,11 @@ class NativeClient:
         job_id = None
         server_id = None
         voice_chunks = []
+        last_report = asyncio.get_running_loop().time()
+        last_state = None
+        last_phase = None
+        slow_warned = False
+        accepted_since = None
 
         def inspection(state):
             return SendError(state, key, job_id, chunks=voice_chunks)
@@ -1746,44 +1970,123 @@ class NativeClient:
                 record_chunks(chunks)
                 voice_chunks = chunks
             state = value.get("state")
+            phase = value.get("phase")
+            if not isinstance(phase, str):
+                phase = None
+            now = asyncio.get_running_loop().time()
+            if kind == "video" and (
+                now - last_report >= 15 or phase != last_phase or state != last_state
+            ):
+                completed = result.get("completedBytes") if isinstance(result, dict) else None
+                total = result.get("totalBytes") if isinstance(result, dict) else None
+                profile = result.get("profileProjection") if isinstance(result, dict) else None
+                ids = result.get("messageIds") if isinstance(result, dict) else None
+                server = value.get("serverMessageId")
+                logger.info(
+                    "微信消息适配器 视频任务进度：job=%s state=%s phase=%s "
+                    "progress=%s/%s profile=%s server_id=%s ids=%s elapsed=%.0fs",
+                    job_id,
+                    state,
+                    phase or "-",
+                    _progress_text(completed),
+                    _progress_text(total),
+                    profile or "-",
+                    "yes" if isinstance(server, str) and server else "no",
+                    len(ids) if isinstance(ids, list) else "-",
+                    now - started,
+                )
+                last_report, last_state, last_phase = now, state, phase
+            if kind == "video" and not slow_warned and now - started >= 60:
+                slow_warned = True
+                logger.warning(
+                    "微信消息适配器 视频发送已等待 %.0fs：Native 可能正在转码、排队或"
+                    "分块上传。若日志停在 queued，通常是前一条媒体任务仍占用账号锁。",
+                    now - started,
+                )
             if state in {"failed", "cancelled", "partial", "needs_review"}:
                 if state in {"failed", "cancelled"} and any(
                     c["state"] == "accepted" for c in voice_chunks
                 ):
                     state = "partial"
+                if kind == "video":
+                    failed_result = value.get("result")
+                    prepared = (
+                        failed_result.get("videoPreparation")
+                        if isinstance(failed_result, dict)
+                        else None
+                    )
+                    normal_bytes = (
+                        prepared.get("normalBytes") if isinstance(prepared, dict) else None
+                    )
+                    source_preserved = (
+                        prepared.get("sourcePreserved")
+                        if isinstance(prepared, dict)
+                        else None
+                    )
+                    logger.warning(
+                        "微信消息适配器 视频任务未完成：job=%s state=%s phase=%s "
+                        "error=%s service=%s/%s normal_bytes=%s source_preserved=%s "
+                        "source_bytes=%s",
+                        job_id,
+                        state,
+                        phase or "-",
+                        value.get("errorCode") or value.get("error_code") or "-",
+                        failed_result.get("serviceStage")
+                        if isinstance(failed_result, dict)
+                        else "-",
+                        failed_result.get("serviceCode")
+                        if isinstance(failed_result, dict)
+                        else "-",
+                        _progress_text(normal_bytes)
+                        if isinstance(normal_bytes, int)
+                        else "-",
+                        source_preserved if isinstance(source_preserved, bool) else "-",
+                        len(data),
+                    )
                 raise inspection(state)
             if state in {"accepted", "completed", "succeeded"}:
+                action = _accepted_media_action(value, kind, voice_chunks)
                 result = value.get("result")
-                if isinstance(result, dict):
-                    if result.get("profileProjection") in {"unknown", "not_applicable"}:
-                        raise inspection("needs_review")
-                    if kind == "voice" and any(
-                        c["state"] in {"rejected", "needs_review"} for c in voice_chunks
-                    ):
-                        raise inspection("needs_review")
+                if not isinstance(result, dict):
+                    result = {}
+                if action == "complete":
+                    if kind == "video":
+                        logger.info(
+                            "微信消息适配器 视频发送完成：job=%s server_message=%s "
+                            "elapsed=%.1fs",
+                            job_id,
+                            value.get("serverMessageId"),
+                            now - started,
+                        )
+                    return value
+                if action == "accepted":
+                    # The server accepted the message but the engine's local
+                    # projection has not produced messageIds (pending /
+                    # not_applicable). Delivery already happened; returning here
+                    # releases the send lock instead of polling for up to an
+                    # hour on a local bookkeeping detail.
                     ids = result.get("messageIds")
-                    complete_voice = (
-                        kind == "voice"
-                        and bool(voice_chunks)
-                        and isinstance(ids, list)
-                        and len(ids) == len(voice_chunks)
-                        and all(isinstance(item, str) and item for item in ids)
-                        and len(set(ids)) == len(ids)
-                        and all(chunk["state"] == "accepted" for chunk in voice_chunks)
-                        and value.get("serverMessageId") == voice_chunks[-1]["serverMessageId"]
+                    logger.warning(
+                        "微信消息适配器 %s已受理但本地投影未完成：job=%s profile=%s "
+                        "ids=%s；按服务端回执成功返回，避免占住发送锁",
+                        "视频" if kind == "video" else "图片",
+                        job_id,
+                        result.get("profileProjection") or "-",
+                        len(ids) if isinstance(ids, list) else "-",
                     )
-                    if complete_voice:
-                        return value
-                    if (
-                        kind in {"image", "video"}
-                        and isinstance(value.get("serverMessageId"), str)
-                        and value["serverMessageId"]
-                        and isinstance(ids, list)
-                        and len(ids) == 1
-                        and isinstance(ids[0], str)
-                        and ids[0]
-                    ):
-                        return value
+                    return value
+                if action == "review":
+                    raise inspection("needs_review")
+                if accepted_since is None:
+                    accepted_since = now
+                elif now - accepted_since >= 15:
+                    logger.warning(
+                        "微信消息适配器 %s任务 accepted 超过 15 秒仍无 serverMessageId："
+                        "job=%s，标记待人工检查并释放发送锁",
+                        "视频" if kind == "video" else "图片",
+                        job_id,
+                    )
+                    raise inspection("needs_review")
             elif state not in {"queued", "running", "submitting"}:
                 raise inspection("unknown")
             remaining = deadline - asyncio.get_running_loop().time()
@@ -1791,7 +2094,10 @@ class NativeClient:
                 raise inspection("status_unavailable")
             try:
                 async with asyncio.timeout(remaining):
-                    await asyncio.sleep(min(self.poll_interval, remaining))
+                    delay = self._media_poll_delay(
+                        asyncio.get_running_loop().time() - started
+                    )
+                    await asyncio.sleep(min(delay, remaining))
                     value = await self.job(job_id)
             except NativeAPIError as error:
                 if error.status in {0, 408, 429} or 500 <= error.status < 600:

@@ -39,6 +39,30 @@ from .native_client import (
 )
 from .runtime import RuntimeUnavailable, get_runtime
 from .state import StateStore, cursor_number
+from .video import VideoPolicy
+
+
+class _LoggedSendLock:
+    """Serializes sends while making a long queue visible in the logs."""
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+
+    def locked(self):
+        return self._lock.locked()
+
+    async def __aenter__(self):
+        started = asyncio.get_running_loop().time()
+        if self._lock.locked():
+            logger.info("微信消息适配器 发送队列等待：前一条消息仍在发送")
+        await self._lock.acquire()
+        waited = asyncio.get_running_loop().time() - started
+        if waited >= 5:
+            logger.info("微信消息适配器 发送队列等待结束：已等待 %.1f 秒", waited)
+        return self
+
+    async def __aexit__(self, *_):
+        self._lock.release()
 
 
 @register_platform_adapter(
@@ -80,6 +104,8 @@ class WeBridgeAdapter(Platform):
         self.bot_self_id = cfg.account_id
         root = state_dir if state_dir is not None else StarTools.get_data_dir(PLUGIN_ID)
         self._state_root = Path(root)
+        self.video_policy = VideoPolicy.load(self._state_root)
+        logger.info("微信消息适配器 视频快速通道：%s", self.video_policy.describe())
         identity = f"{cfg.api_url}\n{cfg.account_id}\n{platform_config.get('id', ADAPTER_ID)}"
         self.state = (
             None
@@ -95,7 +121,7 @@ class WeBridgeAdapter(Platform):
         self._media_tasks = set()
         self._media_semaphore = asyncio.Semaphore(MAX_CONCURRENT_MEDIA_TASKS)
         self._events = weakref.WeakValueDictionary()
-        self._send_lock = asyncio.Lock()
+        self._send_lock = _LoggedSendLock()
         self._terminate_lock = asyncio.Lock()
         self._receive_locks = [asyncio.Lock() for _ in range(256)]
 
@@ -684,6 +710,7 @@ class WeBridgeAdapter(Platform):
                 for index, part in enumerate(parts):
                     # Resolve each image with bounded memory, before recording an intent.
                     # No later component is attempted after a failure or unknown outcome.
+                    data = None
                     if isinstance(part, Nodes):
                         try:
                             forward_nodes = await self.client.prepare_forward(part.nodes)
@@ -692,17 +719,17 @@ class WeBridgeAdapter(Platform):
                                 self.state.mark_message(message_id, "partial")
                             raise
                     elif not isinstance(part, str):
-                        loader = (
-                            load_outgoing_voice
-                            if isinstance(part, Record)
-                            else (
-                                load_outgoing_video
-                                if isinstance(part, Video)
-                                else load_outgoing_image
-                            )
-                        )
                         try:
-                            data, content_type = await loader(part)
+                            if isinstance(part, Record):
+                                data, content_type = await load_outgoing_voice(part)
+                            elif isinstance(part, Video):
+                                # Normalize high-resolution/HEVC clips before the
+                                # engine encodes and uploads them.
+                                data, content_type = await load_outgoing_video(
+                                    part, policy=self.video_policy
+                                )
+                            else:
+                                data, content_type = await load_outgoing_image(part)
                         except BaseException as error:
                             if isinstance(error, ValueError):
                                 logger.warning(
@@ -726,6 +753,7 @@ class WeBridgeAdapter(Platform):
                         message_id,
                         key,
                     )
+                    part_started = asyncio.get_running_loop().time()
                     try:
                         if index or not isinstance(part, str):
                             await check_current_source()
@@ -768,6 +796,15 @@ class WeBridgeAdapter(Platform):
                                 key,
                                 record_job=lambda job_id: self.state.record_send_id(key, job_id),
                                 before_send=check_current_source,
+                            )
+                        if not isinstance(part, str):
+                            logger.info(
+                                "微信消息适配器 媒体发送返回：message=%s kind=%s bytes=%s "
+                                "elapsed=%.1fs",
+                                message_id,
+                                type(part).__name__,
+                                len(data) if isinstance(data, (bytes, bytearray)) else "-",
+                                asyncio.get_running_loop().time() - part_started,
                             )
                     except BaseException as error:
                         state = "needs_review"
@@ -834,15 +871,23 @@ class WeBridgeAdapter(Platform):
         tasks = {task for task in (self._send_tasks | self._media_tasks) if task is not current}
         if self._run_task and self._run_task is not current:
             tasks.add(self._run_task)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        for event in list(self._events.values()):
-            event.stop_event()
-            if not event._execution_active:
-                event.cleanup_temporary_local_files()
-        await self.client.close()
-        if self.state is not None:
-            self.state.close()
-        self._state_closed = True
+        try:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            for event in list(self._events.values()):
+                event.stop_event()
+                if not event._execution_active:
+                    event.cleanup_temporary_local_files()
+        finally:
+            try:
+                await self.client.close()
+            except Exception:
+                logger.exception("微信消息适配器 关闭 Native 客户端失败")
+            if self.state is not None:
+                try:
+                    self.state.close()
+                except Exception:
+                    logger.exception("微信消息适配器 关闭状态库失败")
+            self._state_closed = True

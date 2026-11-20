@@ -12,6 +12,7 @@ from .event import session_id
 from .forward import forward_text, limit_forward_chain, parser_settings
 from .native_ui import NativeView
 from .runtime import RuntimeUnavailable, close_runtime, get_runtime
+from .video import VideoPolicy, set_plugin_config
 
 
 def webridge_session_builder(event) -> str:
@@ -22,8 +23,12 @@ def webridge_session_builder(event) -> str:
 
 
 class WeBridgePlugin(Star):
-    def __init__(self, context: Context):
-        super().__init__(context)
+    def __init__(self, context: Context, config: dict | None = None):
+        super().__init__(context, config)
+        self.config = config
+        # The platform adapter reads VideoPolicy later; publish the plugin
+        # config before PlatformManager creates adapters.
+        set_plugin_config(config)
         native = NativeView(context, get_runtime())
         for route, handler, method, description in [
             ("status", native.status, "GET", "微信账号状态"),
@@ -67,6 +72,14 @@ class WeBridgePlugin(Star):
             request.prompt = (request.prompt or "") + "\n" + text
 
     async def initialize(self):
+        # Re-publish in case the adapter is created during this hook, and
+        # refresh any live adapter after a plugin-config save/reload.
+        set_plugin_config(getattr(self, "config", None))
+        manager = getattr(self.context, "platform_manager", None)
+        if manager is not None:
+            for inst in manager.get_insts():
+                if isinstance(inst, WeBridgeAdapter):
+                    inst.video_policy = VideoPolicy.load(inst._state_root)
         # v4.29.4 has no public registration helper for custom session builders.
         # Use its existing registry without changing EventBus or default settings.
         existing = UNIQUE_SESSION_ID_BUILDERS.get(ADAPTER_ID)
@@ -92,15 +105,21 @@ class WeBridgePlugin(Star):
                         await manager.reload(saved)
         logger.info(
             "微信消息适配器 已加载集成版：内置 Native，图片与聊天记录收发，视频发送，收到视频忽略；"
-            "构建 integrated-20261110-media-lifecycle"
+            "构建 integrated-20261119-video-quality"
         )
 
     async def terminate(self):
-        manager = getattr(self.context, "platform_manager", None)
-        if manager is not None:
-            for inst in list(manager.get_insts()):
-                if inst.meta().name == ADAPTER_ID:
-                    await manager.terminate_platform(inst.meta().id)
-        if UNIQUE_SESSION_ID_BUILDERS.get(ADAPTER_ID) is webridge_session_builder:
-            UNIQUE_SESSION_ID_BUILDERS.pop(ADAPTER_ID)
-        await close_runtime()
+        try:
+            manager = getattr(self.context, "platform_manager", None)
+            if manager is not None:
+                for inst in list(manager.get_insts()):
+                    if inst.meta().name != ADAPTER_ID:
+                        continue
+                    try:
+                        await manager.terminate_platform(inst.meta().id)
+                    except Exception:
+                        logger.exception("微信消息适配器 停止消息平台失败，继续清理引擎")
+        finally:
+            if UNIQUE_SESSION_ID_BUILDERS.get(ADAPTER_ID) is webridge_session_builder:
+                UNIQUE_SESSION_ID_BUILDERS.pop(ADAPTER_ID)
+            await close_runtime()

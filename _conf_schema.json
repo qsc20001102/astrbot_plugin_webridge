@@ -1,0 +1,92 @@
+{
+  "video": {
+    "type": "object",
+    "description": "视频发送",
+    "hint": "默认不转码、不缩放、不降帧。只有显式开启“本地转码”才会重新编码；速度档需要再显式设置长边/帧率/CRF。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用视频处理层",
+        "hint": "关闭后完全退回旧行为：源文件原样交给 Native，不读取视频参数。",
+        "default": true
+      },
+      "transcode": {
+        "type": "bool",
+        "description": "允许本地转码",
+        "hint": "默认关闭，画质零变化。开启后默认保持来源分辨率、帧率和声道，使用 H.264 CRF 18；仍是一次有损编码。",
+        "default": false
+      },
+      "max_edge": {
+        "type": "int",
+        "description": "长边上限（像素）",
+        "hint": "0 = 保持来源分辨率。设为 1280 会缩到 720p 级别，属于画质取舍，必须配合“允许本地转码”。",
+        "default": 0
+      },
+      "max_fps": {
+        "type": "float",
+        "description": "帧率上限",
+        "hint": "0 = 保持来源帧率。设为 30 会降低高帧率视频，属于画质取舍。",
+        "default": 0.0
+      },
+      "crf": {
+        "type": "int",
+        "description": "CRF 画质",
+        "hint": "越小越清晰、文件越大。18 与引擎自身转码同档；23 是速度档，会降低画质。",
+        "default": 18
+      },
+      "preset": {
+        "type": "string",
+        "description": "x264 编码预设",
+        "hint": "veryfast 速度与画质平衡；superfast 更快；fast 更清晰但更慢。",
+        "default": "veryfast",
+        "options": [
+          "ultrafast",
+          "superfast",
+          "veryfast",
+          "faster",
+          "fast",
+          "medium",
+          "slow",
+          "slower",
+          "veryslow"
+        ]
+      },
+      "audio_kbps": {
+        "type": "int",
+        "description": "AAC 音频码率（kbps）",
+        "hint": "仅在本地转码时使用；声道数跟随来源，多声道会降为立体声。",
+        "default": 128
+      },
+      "timeout": {
+        "type": "float",
+        "description": "单次转码基础超时（秒）",
+        "hint": "长视频按 3 倍时长放宽，最多 900 秒；超时后原样交给 Native。",
+        "default": 120.0
+      },
+      "max_seconds": {
+        "type": "float",
+        "description": "参与透传判断的最大时长（秒）",
+        "hint": "超过此时长的来源不做本地透传判断；与引擎 3600 秒上限一致。",
+        "default": 3600.0
+      },
+      "max_output_mb": {
+        "type": "int",
+        "description": "转码输出上限（MiB）",
+        "hint": "0 = 不限制（不牺牲画质）。仅本地转码时生效；超过上限会回退原始视频。",
+        "default": 0
+      },
+      "max_passthrough_mb": {
+        "type": "int",
+        "description": "透传体积上限（MiB）",
+        "hint": "0 = 不限制；默认 4096，实际上不限制普通视频。",
+        "default": 4096
+      },
+      "max_input_mb": {
+        "type": "int",
+        "description": "本地转码输入上限（MiB）",
+        "hint": "超过此大小的视频不尝试本地转码，直接交给 Native。",
+        "default": 512
+      }
+    }
+  }
+}

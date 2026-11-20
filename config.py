@@ -1,5 +1,6 @@
 """Connection settings only. Reply policy belongs to AstrBot's selected profile."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -17,6 +18,25 @@ VOICE_SEND_TIMEOUT = 25 * 60
 VIDEO_PROTOCOL_MAX_BYTES = (1 << 32) - 17
 VIDEO_SEND_TIMEOUT = 60 * 60
 VIDEO_DOWNLOAD_TIMEOUT = 180
+
+
+def _env_number(name: str, default: float, minimum: float, maximum: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return float(default)
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(default)
+    return max(minimum, min(maximum, value))
+
+
+# The engine holds its account lock while it prepares and uploads a video, so
+# make the wait observable and tunable instead of silently sitting on one hour.
+VIDEO_SEND_TIMEOUT = _env_number("WEBRIDGE_VIDEO_SEND_TIMEOUT", VIDEO_SEND_TIMEOUT, 30, 7200)
+VIDEO_DOWNLOAD_TIMEOUT = _env_number(
+    "WEBRIDGE_VIDEO_DOWNLOAD_TIMEOUT", VIDEO_DOWNLOAD_TIMEOUT, 15, 1800
+)
 MEDIA_DOWNLOAD_TIMEOUT = 60
 MAX_CONCURRENT_MEDIA_TASKS = 3
 

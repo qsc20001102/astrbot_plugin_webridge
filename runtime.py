@@ -258,12 +258,14 @@ class NativeRuntime:
         if self._stderr_task is not None:
             self._stderr_task.cancel()
             await asyncio.gather(self._stderr_task, return_exceptions=True)
-        if client is not None:
-            await client.close()
-        if self._file_lock is not None:
-            self._file_lock.close()
-        self.process = self.client = self.identity = self._file_lock = None
-        self._stderr_task = None
+        try:
+            if client is not None:
+                await client.close()
+        finally:
+            if self._file_lock is not None:
+                self._file_lock.close()
+            self.process = self.client = self.identity = self._file_lock = None
+            self._stderr_task = None
         self._token = ""
         self.api_url = ""
 
