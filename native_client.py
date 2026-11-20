@@ -2033,9 +2033,11 @@ class NativeClient:
                 error_code = (
                     value.get("errorCode") or value.get("error_code") or "-"
                 )
-                error_detail = failed_result.get("errorDetail")
-                if not isinstance(error_detail, str) or not error_detail:
-                    error_detail = "-"
+                cdn_failure = failed_result.get("cdnDownloadFailure")
+                if isinstance(cdn_failure, dict):
+                    detail = json.dumps(cdn_failure, ensure_ascii=False, sort_keys=True)
+                else:
+                    detail = "-"
                 service_stage = failed_result.get("serviceStage")
                 service_code = failed_result.get("serviceCode")
                 if kind == "video":
@@ -2056,7 +2058,7 @@ class NativeClient:
                         state,
                         phase or "-",
                         error_code,
-                        error_detail,
+                        detail,
                         service_stage if service_stage is not None else "-",
                         service_code if service_code is not None else "-",
                         _progress_text(normal_bytes)
@@ -2089,7 +2091,7 @@ class NativeClient:
                         state,
                         phase or "-",
                         error_code,
-                        error_detail,
+                        detail,
                         service_stage if service_stage is not None else "-",
                         service_code if service_code is not None else "-",
                     )

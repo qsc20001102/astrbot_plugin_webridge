@@ -12,67 +12,46 @@ index 0000000..5135841
 +protocol with its persisted task ID, and send the pairing thumbnail as its own
 +type-3 object on the ordinary CDN route.
 diff --git a/packages/native-client-rust/crates/wechat-core/src/media.rs b/packages/native-client-rust/crates/wechat-core/src/media.rs
-index a7b6ad0..6e19f87 100644
+index a7b6ad0..65ccdfb 100644
 --- a/packages/native-client-rust/crates/wechat-core/src/media.rs
 +++ b/packages/native-client-rust/crates/wechat-core/src/media.rs
-@@ -1321,9 +1321,7 @@ impl Core {
-     ) -> Result<()> {
-         let service = service_diagnostic(error);
-         let cdn = cdn_download_failure(error);
--        if service.is_none() && cdn.is_none() {
--            return Ok(());
--        }
-+        let detail = failure_detail(error);
-         let mut row = self.store.media_job(account, id)?;
-         if let Some((stage, code)) = service {
-             row.data["result"]["serviceStage"] = stage.into();
-@@ -1332,6 +1330,11 @@ impl Core {
-         if let Some(detail) = cdn {
-             row.data["result"]["cdnDownloadFailure"] = detail;
-         }
-+        // Every entry below comes from this engine's own guards, never from a raw
-+        // service reply, so a bounded chain can be retained for diagnosis.
-+        if let Some(detail) = detail {
-+            row.data["result"]["errorDetail"] = detail.into();
+@@ -1949,14 +1949,30 @@ impl Core {
+ // Only a whole numeric suffix on these fixed library messages may cross the
+ // protected boundary. General error strings can contain URLs or account data.
+ fn cdn_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
+-    use wechat_protocol::media::LargeFileDownloadError;
++    use wechat_protocol::media::{LargeFileDownloadError, LargeVideoDownloadError};
++    if let Some(failure) = error
++        .chain()
++        .find_map(|cause| cause.downcast_ref::<LargeFileDownloadError>())
++    {
++        return Some(match failure {
++            LargeFileDownloadError::UnknownField => json!({"kind":"unknown_field"}),
++            LargeFileDownloadError::FixedControlMismatch { control, actual } => {
++                json!({"kind":"fixed_control_mismatch","field":control.field_name(),"actual":actual})
++            }
++        });
++    }
+     let failure = error
+         .chain()
+-        .find_map(|cause| cause.downcast_ref::<LargeFileDownloadError>())?;
++        .find_map(|cause| cause.downcast_ref::<LargeVideoDownloadError>())?;
+     Some(match failure {
+-        LargeFileDownloadError::UnknownField => json!({"kind":"unknown_field"}),
+-        LargeFileDownloadError::FixedControlMismatch { control, actual } => {
+-            json!({"kind":"fixed_control_mismatch","field":control.field_name(),"actual":actual})
++        LargeVideoDownloadError::Version { actual } => {
++            json!({"kind":"large_video_version","actual":actual})
 +        }
-         self.store.save_media_job(account, &row)?;
-         Ok(())
-     }
-@@ -1960,6 +1963,33 @@ fn cdn_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
++        LargeVideoDownloadError::Control { field, actual } => {
++            json!({"kind":"large_video_control","field":field,"actual":actual})
++        }
++        LargeVideoDownloadError::Representation { actual } => {
++            json!({"kind":"large_video_representation","actual":actual})
          }
      })
  }
-+const MAX_ERROR_DETAIL_CHARS: usize = 300;
-+/// Bounded, printable-only failure chain. Root cause first, so the truncated
-+/// detail still names the guard that rejected the job.
-+fn failure_detail(error: &anyhow::Error) -> Option<String> {
-+    let mut causes: Vec<String> = Vec::new();
-+    for cause in error.chain() {
-+        let text: String = cause
-+            .to_string()
-+            .chars()
-+            .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '?' })
-+            .collect();
-+        if !text.is_empty() {
-+            causes.push(text);
-+        }
-+    }
-+    if causes.is_empty() {
-+        return None;
-+    }
-+    causes.reverse();
-+    Some(
-+        causes
-+            .join(" | ")
-+            .chars()
-+            .take(MAX_ERROR_DETAIL_CHARS)
-+            .collect(),
-+    )
-+}
- fn service_diagnostic(error: &anyhow::Error) -> Option<(&'static str, i32)> {
-     for cause in error.chain() {
-         let message = cause.to_string();
-@@ -2909,11 +2939,35 @@ impl Core {
+@@ -2909,11 +2925,35 @@ impl Core {
                          &material.key,
                          &material.file_key,
                      )?;
@@ -111,6 +90,38 @@ index a7b6ad0..6e19f87 100644
                      plan.uploaded_video = Some(uploaded);
                      // Retain accepted CDN objects before a late cancellation or logout check.
                      self.save_send_plan(account, id, &plan)?;
+@@ -3930,6 +3970,31 @@ mod tests {
+         ))
+         .is_none());
+     }
++    #[test]
++    fn large_video_readback_diagnostics_keep_only_fixed_fields_and_codes() {
++        use wechat_protocol::media::LargeVideoDownloadError as Failure;
++        for (failure, expected) in [
++            (
++                Failure::Version { actual: 2 },
++                json!({"kind":"large_video_version","actual":2}),
++            ),
++            (
++                Failure::Control {
++                    field: "videoformat",
++                    actual: 3,
++                },
++                json!({"kind":"large_video_control","field":"videoformat","actual":3}),
++            ),
++            (
++                Failure::Representation { actual: 7 },
++                json!({"kind":"large_video_representation","actual":7}),
++            ),
++        ] {
++            let error = anyhow::Error::new(failure).context("private raw body");
++            assert_eq!(cdn_download_failure(&error), Some(expected));
++            assert_eq!(classify_error(&error), "unsupported_media");
++        }
++    }
+     // Large metadata with a tiny sealed fixture keeps admission tests from
+     // allocating hundreds of MiB. Full worker source authentication is tested
+     // separately; the readback/submit seam receives that authenticated proof.
 diff --git a/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs b/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs
 index cb02b8d..b6b6dce 100644
 --- a/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs
@@ -255,12 +266,44 @@ index 9e80ab8..376f2ff 100644
      fn standalone_original_video_uses_type_four_without_thumbnail() {
          let mut raw = prepared().clone();
 diff --git a/packages/native-client-rust/crates/wechat-protocol/src/media.rs b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
-index 3cb44da..b4175a9 100644
+index 3cb44da..374b27a 100644
 --- a/packages/native-client-rust/crates/wechat-protocol/src/media.rs
 +++ b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
-@@ -808,42 +808,26 @@ impl fmt::Display for LargeFileDownloadError {
+@@ -807,43 +807,57 @@ impl fmt::Display for LargeFileDownloadError {
+     }
  }
  impl std::error::Error for LargeFileDownloadError {}
++/// Rejection detail for a type-4 readback. Only this engine's own field names and
++/// parsed integer codes are retained; response bytes never enter the message.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum LargeVideoDownloadError {
++    Version {
++        actual: i64,
++    },
++    Control {
++        field: &'static str,
++        actual: i64,
++    },
++    Representation {
++        actual: i64,
++    },
++}
++impl fmt::Display for LargeVideoDownloadError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Version { actual } => {
++                write!(f, "Unsupported large-video download version {actual}")
++            }
++            Self::Control { field, actual } => {
++                write!(f, "Unsupported large-video download control {field}={actual}")
++            }
++            Self::Representation { actual } => {
++                write!(f, "Unsupported large-video download representation {actual}")
++            }
++        }
++    }
++}
++impl std::error::Error for LargeVideoDownloadError {}
  
 -// Type 4 retains the normal download endpoint. Unlike file7, representation
 -// and routing metadata cannot be ignored for a byte-exact original video.
@@ -308,47 +351,62 @@ index 3cb44da..b4175a9 100644
 +    // protocol version in some replies.
 +    if reply.contains_key("ver") {
 +        let version = integer(reply, "ver")?;
-+        ensure!(
-+            matches!(version, 0 | 1),
-+            "Unsupported large-video download version {version}"
-+        );
++        if !matches!(version, 0 | 1) {
++            return Err(LargeVideoDownloadError::Version { actual: version }.into());
++        }
 +    }
      for key in [
          "retrysec",
          "isretry",
-@@ -853,9 +837,10 @@ fn validate_large_video_download_reply(
+@@ -853,10 +867,14 @@ fn validate_large_video_download_reply(
          "rsppicformat",
      ] {
          if reply.contains_key(key) {
-+            let value = integer(reply, key)?;
-             ensure!(
+-            ensure!(
 -                integer(reply, key)? == 0,
 -                "Unsupported large-video download control"
-+                value == 0,
-+                "Unsupported large-video download control {key}={value}"
-             );
+-            );
++            let value = integer(reply, key)?;
++            if value != 0 {
++                return Err(LargeVideoDownloadError::Control {
++                    field: key,
++                    actual: value,
++                }
++                .into());
++            }
          }
      }
-@@ -870,14 +855,15 @@ fn validate_large_video_download_reply(
+     // Linux 4.1.13.26's normal pipeline response map discards `istrans`.
+@@ -868,17 +886,20 @@ fn validate_large_video_download_reply(
+     for (key, observed) in [("istrans", 999), ("videoformat", 1)] {
+         if reply.contains_key(key) {
              let value = integer(reply, key)?;
-             ensure!(
-                 value == 0 || value == observed,
+-            ensure!(
+-                value == 0 || value == observed,
 -                "Unsupported large-video download control"
-+                "Unsupported large-video download control {key}={value}"
-             );
+-            );
++            if value != 0 && value != observed {
++                return Err(LargeVideoDownloadError::Control {
++                    field: key,
++                    actual: value,
++                }
++                .into());
++            }
          }
      }
      if reply.contains_key("substituteftype") {
-+        let kind = integer(reply, "substituteftype")?;
-         ensure!(
+-        ensure!(
 -            matches!(integer(reply, "substituteftype")?, 0 | 4),
 -            "Unsupported large-video download representation"
-+            matches!(kind, 0 | 4),
-+            "Unsupported large-video download representation {kind}"
-         );
+-        );
++        let kind = integer(reply, "substituteftype")?;
++        if !matches!(kind, 0 | 4) {
++            return Err(LargeVideoDownloadError::Representation { actual: kind }.into());
++        }
      }
      if reply.contains_key("rawfilesize") {
-@@ -1017,27 +1003,25 @@ fn escaped_component(s: &str) -> String {
+         ensure!(
+@@ -1017,27 +1038,25 @@ fn escaped_component(s: &str) -> String {
          })
          .collect()
  }
@@ -387,7 +445,7 @@ index 3cb44da..b4175a9 100644
          ("thumbtotalsize", 0),
          ("rawthumbsize", 0),
          ("encthumbcrc", 0),
-@@ -1045,21 +1029,96 @@ fn upload_fields(
+@@ -1045,21 +1064,96 @@ fn upload_fields(
          ("rangestart", start as u64),
          ("rangeend", end as u64),
      ] {
@@ -495,7 +553,7 @@ index 3cb44da..b4175a9 100644
  }
  fn validate_upload_reply(
      reply: &CdnFields,
-@@ -1290,6 +1349,31 @@ impl PreparedImageUpload {
+@@ -1290,6 +1384,31 @@ impl PreparedImageUpload {
      }
  }
  impl PreparedVideoUpload {
@@ -527,7 +585,7 @@ index 3cb44da..b4175a9 100644
      pub fn with_material(
          video: &[u8],
          thumbnail: &[u8],
-@@ -1468,6 +1552,62 @@ impl CdnClient {
+@@ -1468,6 +1587,62 @@ impl CdnClient {
      ) -> Result<UploadedVideo> {
          self.upload_video_with_transport(p, progress, |path, fields| self.post(path, fields))
      }
@@ -590,7 +648,7 @@ index 3cb44da..b4175a9 100644
      fn upload_video_with_transport(
          &self,
          p: &PreparedVideoUpload,
-@@ -1479,6 +1619,12 @@ impl CdnClient {
+@@ -1479,6 +1654,12 @@ impl CdnClient {
              p.video.kind == MediaQuality::Video,
              "Invalid normal video upload profile"
          );
@@ -603,7 +661,7 @@ index 3cb44da..b4175a9 100644
          p.thumbnail.validate(&p.video.aes_key)?;
          ensure!(
              p.thumbnail.width <= 320 && p.thumbnail.height <= 320,
-@@ -1626,7 +1772,7 @@ mod tests {
+@@ -1626,7 +1807,7 @@ mod tests {
      }
  
      #[test]
@@ -612,7 +670,7 @@ index 3cb44da..b4175a9 100644
          let (mut descriptor, _, ciphertext) = download_fixture(16, MediaQuality::Video);
          descriptor.expected_bytes = Some(MAX_CDN_TRANSFER_BYTES as u64 + 1);
          let fields = BTreeMap::from([
-@@ -1637,25 +1783,41 @@ mod tests {
+@@ -1637,25 +1818,41 @@ mod tests {
              ("fileid".into(), descriptor.file_id.as_bytes().to_vec()),
          ]);
          let valid = download_reply(&fields, &descriptor, &ciphertext);
@@ -664,7 +722,7 @@ index 3cb44da..b4175a9 100644
          }
          for (size, checksum) in [
              (
-@@ -2317,7 +2479,7 @@ mod tests {
+@@ -2317,7 +2514,7 @@ mod tests {
      }
  
      #[test]
@@ -673,7 +731,7 @@ index 3cb44da..b4175a9 100644
          let mut video = b"\0\0\0\x0cftypisom".to_vec();
          video.resize(51 * 1024 * 1024, 0x37);
          let mut thumbnail = Vec::new();
-@@ -2333,40 +2495,146 @@ mod tests {
+@@ -2333,40 +2530,146 @@ mod tests {
              "00112233445566778899aabbccddeeff",
          )
          .unwrap();
