@@ -1,0 +1,680 @@
+diff --git a/.changeset/webridge-video-multiphase.md b/.changeset/webridge-video-multiphase.md
+new file mode 100644
+index 0000000..5135841
+--- /dev/null
++++ b/.changeset/webridge-video-multiphase.md
+@@ -0,0 +1,7 @@
++---
++"@agent-wechat/agent-wechat": patch
++---
++
++Upload a video playback copy above one CDN request through the multiphase
++protocol with its persisted task ID, and send the pairing thumbnail as its own
++type-3 object on the ordinary CDN route.
+diff --git a/packages/native-client-rust/crates/wechat-core/src/media.rs b/packages/native-client-rust/crates/wechat-core/src/media.rs
+index a7b6ad0..96ea35c 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/media.rs
+@@ -2909,11 +2909,35 @@ impl Core {
+                         &material.key,
+                         &material.file_key,
+                     )?;
++                    // The task ID is persisted with the upload material before
++                    // the first request, so a multiphase retry stays bound.
++                    let task_id = material.task_id;
+                     self.phase_media(account, id, "uploading")?;
+                     let fence = self.media_authorization_fence(account)?;
+-                    let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
+-                        cdn.upload_video(&prepared, &callback)
+-                    })?;
++                    let uploaded = if prepared.video_needs_multiphase() {
++                        // One multiphase apply carries a single type-4 object, so
++                        // the thumbnail becomes its own type-3 object on the
++                        // ordinary CDN route first.
++                        let thumbnail = cdn_transfer(permit.as_deref_mut(), self, account, || {
++                            cdn.upload_video_thumbnail(&prepared, &callback)
++                        })?;
++                        let large = self
++                            .upstream
++                            .media_transport_route(&mut state, Some(LargeCdnRoute::Upload))?;
++                        self.save_state(account, &state)?;
++                        let video = cdn_transfer(permit.as_deref_mut(), self, account, || {
++                            large.upload_video_multiphase(&prepared, task_id, &callback)
++                        })?;
++                        UploadedVideo {
++                            video,
++                            thumbnail,
++                            original: None,
++                        }
++                    } else {
++                        cdn_transfer(permit.as_deref_mut(), self, account, || {
++                            cdn.upload_video(&prepared, &callback)
++                        })?
++                    };
+                     plan.uploaded_video = Some(uploaded);
+                     // Retain accepted CDN objects before a late cancellation or logout check.
+                     self.save_send_plan(account, id, &plan)?;
+diff --git a/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs b/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs
+index cb02b8d..b6b6dce 100644
+--- a/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/upstream_media.rs
+@@ -27,6 +27,27 @@ pub trait MediaTransport {
+         prepared: &PreparedVideoUpload,
+         progress: Progress<'_>,
+     ) -> Result<UploadedVideo>;
++    /// Upload the standalone type-3 thumbnail of a video whose playback copy
++    /// exceeds one CDN request. It must use the ordinary CDN route.
++    fn upload_video_thumbnail(
++        &self,
++        prepared: &PreparedVideoUpload,
++        progress: Progress<'_>,
++    ) -> Result<UploadedMedia> {
++        self.native()?
++            .upload_video_thumbnail_with_progress(prepared, progress)
++    }
++    /// Upload a playback copy that exceeds one CDN request through the
++    /// multiphase protocol with its persisted task ID.
++    fn upload_video_multiphase(
++        &self,
++        prepared: &PreparedVideoUpload,
++        task_id: u64,
++        progress: Progress<'_>,
++    ) -> Result<UploadedMedia> {
++        self.native()?
++            .upload_video_multiphase_with_progress(prepared, task_id, progress)
++    }
+     fn upload_video_original(
+         &self,
+         prepared: &PreparedUpload,
+diff --git a/packages/native-client-rust/crates/wechat-protocol/src/large_file.rs b/packages/native-client-rust/crates/wechat-protocol/src/large_file.rs
+index 9e80ab8..376f2ff 100644
+--- a/packages/native-client-rust/crates/wechat-protocol/src/large_file.rs
++++ b/packages/native-client-rust/crates/wechat-protocol/src/large_file.rs
+@@ -56,6 +56,28 @@ impl CdnClient {
+             progress,
+         )
+     }
++
++    /// Upload the playback copy of a normal video through the multiphase
++    /// protocol. Only material above one request reaches this path; the
++    /// thumbnail is a separate type-3 object on the ordinary route.
++    pub fn upload_video_multiphase_with_progress(
++        &self,
++        prepared: &PreparedVideoUpload,
++        task_id: u64,
++        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
++    ) -> Result<UploadedMedia> {
++        ensure!(
++            prepared.video.kind == MediaQuality::Video && prepared.video_needs_multiphase(),
++            "Expected a multiphase video playback copy"
++        );
++        upload_video_original(
++            self,
++            &prepared.video,
++            task_id,
++            |path, fields| self.post(path, fields),
++            progress,
++        )
++    }
+ }
+ 
+ fn upload_video_original(
+@@ -606,6 +628,77 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn multiphase_video_playback_copy_keeps_type_four_and_needs_its_task() {
++        let mut thumbnail = Vec::new();
++        image::codecs::jpeg::JpegEncoder::new(&mut thumbnail)
++            .encode_image(&image::DynamicImage::new_rgb8(16, 12))
++            .unwrap();
++        let mut video = b"\0\0\0\x0cftypisom".to_vec();
++        video.resize(MAX_CDN_TRANSFER_BYTES + 1024, 0x37);
++        let prepared = PreparedVideoUpload::with_material(
++            &video,
++            &thumbnail,
++            "large.mp4",
++            "filehelper",
++            &[0x31; 16],
++            "00112233445566778899aabbccddeeff",
++        )
++        .unwrap();
++        assert!(prepared.video_needs_multiphase());
++        let cdn = CdnClient::new(config(), Duration::from_secs(1)).unwrap();
++        let mut peer = Peer::new(&prepared.video, 1024 * 1024);
++        let uploaded = upload_video_original(
++            &cdn,
++            &prepared.video,
++            987654321,
++            |path, fields| {
++                // The multiphase apply carries the playback copy alone.
++                assert!(!fields.contains_key("thumbdata"));
++                assert!(!fields.contains_key("type_1"));
++                peer.respond(path, fields)
++            },
++            |_, _| Ok(()),
++        )
++        .unwrap();
++        assert_eq!(uploaded.descriptor.quality, MediaQuality::Video);
++        assert_eq!(
++            uploaded.descriptor.expected_bytes,
++            Some(u64::from(prepared.video.plaintext_bytes))
++        );
++        assert_eq!(uploaded.sha256, prepared.video.sha256);
++        assert_eq!(peer.requests, peer.blocks() + 3);
++        assert_eq!(
++            decrypt_cdn(&prepared.video.encrypted, &prepared.video.aes_key).unwrap(),
++            video
++        );
++
++        let small = PreparedVideoUpload::with_material(
++            b"\0\0\0\x0cftypisom",
++            &thumbnail,
++            "small.mp4",
++            "filehelper",
++            &[0x31; 16],
++            "00112233445566778899aabbccddeeff",
++        )
++        .unwrap();
++        assert!(!small.video_needs_multiphase());
++        assert_eq!(
++            cdn.upload_video_multiphase_with_progress(&small, 987654321, |_, _| Ok(()))
++                .err()
++                .unwrap()
++                .to_string(),
++            "Expected a multiphase video playback copy"
++        );
++        assert_eq!(
++            cdn.upload_video_multiphase_with_progress(&prepared, 0, |_, _| Ok(()))
++                .err()
++                .unwrap()
++                .to_string(),
++            "Expected an original video upload and task ID"
++        );
++    }
++
+     #[test]
+     fn standalone_original_video_uses_type_four_without_thumbnail() {
+         let mut raw = prepared().clone();
+diff --git a/packages/native-client-rust/crates/wechat-protocol/src/media.rs b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
+index 3cb44da..0153640 100644
+--- a/packages/native-client-rust/crates/wechat-protocol/src/media.rs
++++ b/packages/native-client-rust/crates/wechat-protocol/src/media.rs
+@@ -1017,27 +1017,25 @@ fn escaped_component(s: &str) -> String {
+         })
+         .collect()
+ }
+-fn upload_fields(
+-    conf: &CdnConfig,
+-    p: &PreparedUpload,
+-    sequence: u32,
++/// Size and range controls shared by one-object uploads. A standalone thumbnail
++/// carries no attached thumbnail of its own, exactly like every other single
++/// object upload.
++fn upload_common_fields(
++    mut fields: CdnFields,
++    total: usize,
++    raw_total: u64,
+     start: usize,
+     end: usize,
+-) -> Result<CdnFields> {
+-    ensure!(
+-        sequence > 0 && start <= end && end < p.encrypted.len() && end - start < UPLOAD_CHUNK,
+-        "Invalid upload range"
+-    );
+-    let mut f = shared(conf, sequence, p.kind.filetype());
++) -> CdnFields {
+     for (k, v) in [
+-        ("hasthumb", 0),
++        ("hasthumb", 0u64),
+         ("compresstype", 0),
+         ("nocheckaeskey", 1),
+         ("enablehit", 0),
+         ("existancecheck", 0),
+         ("apptype", 0),
+-        ("totalsize", p.encrypted.len() as u64),
+-        ("rawtotalsize", p.plaintext_bytes as u64),
++        ("totalsize", total as u64),
++        ("rawtotalsize", raw_total),
+         ("thumbtotalsize", 0),
+         ("rawthumbsize", 0),
+         ("encthumbcrc", 0),
+@@ -1045,21 +1043,96 @@ fn upload_fields(
+         ("rangestart", start as u64),
+         ("rangeend", end as u64),
+     ] {
+-        put(&mut f, k, v);
++        put(&mut fields, k, v);
+     }
++    fields
++}
++/// Identity and digest controls. Every object carries the recipient, the client
++/// generated file key and both whole-file and this-request block digests.
++fn upload_identity_fields(
++    mut fields: CdnFields,
++    destination: &str,
++    file_key: &str,
++    local_name: &str,
++    plain_md5: &str,
++    block_md5: String,
++) -> Result<CdnFields> {
+     for (k, v) in [
+-        ("touser", encrypt_recipient(&p.destination)?),
+-        ("filekey", p.file_key.clone()),
+-        ("localname", escaped_component(&p.file_name)),
+-        ("filedatamd5", hex::encode(md5(&p.encrypted[start..=end]))),
+-        ("filemd5", p.md5.clone()),
+-        ("rawfilemd5", p.md5.clone()),
+-        ("blockmd5", hex::encode(md5(&p.encrypted[start..=end]))),
++        ("touser", encrypt_recipient(destination)?),
++        ("filekey", file_key.to_string()),
++        ("localname", local_name.to_string()),
++        ("filedatamd5", block_md5.clone()),
++        ("filemd5", plain_md5.to_string()),
++        ("rawfilemd5", plain_md5.to_string()),
++        ("blockmd5", block_md5),
+     ] {
+-        f.insert(k.into(), v.into_bytes());
++        fields.insert(k.into(), v.into_bytes());
+     }
+-    f.insert("rawthumbmd5".into(), vec![]);
+-    Ok(f)
++    fields.insert("rawthumbmd5".into(), vec![]);
++    Ok(fields)
++}
++fn upload_fields(
++    conf: &CdnConfig,
++    p: &PreparedUpload,
++    sequence: u32,
++    start: usize,
++    end: usize,
++) -> Result<CdnFields> {
++    ensure!(
++        sequence > 0 && start <= end && end < p.encrypted.len() && end - start < UPLOAD_CHUNK,
++        "Invalid upload range"
++    );
++    let fields = shared(conf, sequence, p.kind.filetype());
++    let fields = upload_common_fields(
++        fields,
++        p.encrypted.len(),
++        u64::from(p.plaintext_bytes),
++        start,
++        end,
++    );
++    upload_identity_fields(
++        fields,
++        &p.destination,
++        &p.file_key,
++        &escaped_component(&p.file_name),
++        &p.md5,
++        hex::encode(md5(&p.encrypted[start..=end])),
++    )
++}
++/// The type-3 object that carries a video thumbnail independently of the
++/// playback copy. It keeps the video's own encryption key so the message can
++/// advertise `cdnthumbaeskey`, but uses its own file key and file name.
++fn upload_thumbnail_fields(
++    conf: &CdnConfig,
++    p: &PreparedVideoUpload,
++    sequence: u32,
++    start: usize,
++    end: usize,
++) -> Result<CdnFields> {
++    let thumbnail = &p.thumbnail;
++    ensure!(
++        sequence > 0
++            && start <= end
++            && end < thumbnail.encrypted.len()
++            && end - start < UPLOAD_CHUNK,
++        "Invalid upload range"
++    );
++    let fields = shared(conf, sequence, MediaQuality::Thumbnail.filetype());
++    let fields = upload_common_fields(
++        fields,
++        thumbnail.encrypted.len(),
++        u64::from(thumbnail.plaintext_bytes),
++        start,
++        end,
++    );
++    upload_identity_fields(
++        fields,
++        &p.video.destination,
++        &p.thumbnail_file_key(),
++        &escaped_component(&p.thumbnail_file_name()),
++        &thumbnail.md5,
++        hex::encode(md5(&thumbnail.encrypted[start..=end])),
++    )
+ }
+ fn validate_upload_reply(
+     reply: &CdnFields,
+@@ -1290,6 +1363,31 @@ impl PreparedImageUpload {
+     }
+ }
+ impl PreparedVideoUpload {
++    /// A playback copy above one CDN request can only travel through the
++    /// multiphase protocol, which needs a persisted task ID and a separate
++    /// thumbnail object.
++    pub fn video_needs_multiphase(&self) -> bool {
++        self.video.encrypted.len() >= MAX_CDN_TRANSFER_BYTES
++    }
++    /// Derive the standalone thumbnail's file key from persisted material so a
++    /// retried job sends byte-identical requests.
++    fn thumbnail_file_key(&self) -> String {
++        let seed = format!("{}{}", self.video.file_key, self.thumbnail.md5);
++        hex::encode(md5(seed.as_bytes()))
++    }
++    fn thumbnail_file_name(&self) -> String {
++        let stem = self
++            .video
++            .file_name
++            .rsplit_once('.')
++            .map_or(self.video.file_name.as_str(), |(stem, _)| stem);
++        let stem: String = stem.trim_matches('.').chars().take(250).collect();
++        if stem.is_empty() {
++            "thumb.jpg".into()
++        } else {
++            format!("{stem}.jpg")
++        }
++    }
+     pub fn with_material(
+         video: &[u8],
+         thumbnail: &[u8],
+@@ -1468,6 +1566,62 @@ impl CdnClient {
+     ) -> Result<UploadedVideo> {
+         self.upload_video_with_transport(p, progress, |path, fields| self.post(path, fields))
+     }
++    /// Upload the thumbnail of a video whose playback copy uses the multiphase
++    /// protocol. That protocol carries one object, so the thumbnail travels as
++    /// its own type-3 object through the ordinary CDN route.
++    pub fn upload_video_thumbnail(&self, p: &PreparedVideoUpload) -> Result<UploadedMedia> {
++        self.upload_video_thumbnail_with_progress(p, |_, _| Ok(()))
++    }
++    pub fn upload_video_thumbnail_with_progress(
++        &self,
++        p: &PreparedVideoUpload,
++        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
++    ) -> Result<UploadedMedia> {
++        self.upload_video_thumbnail_with_transport(p, progress, |path, fields| {
++            self.post(path, fields)
++        })
++    }
++    fn upload_video_thumbnail_with_transport(
++        &self,
++        p: &PreparedVideoUpload,
++        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
++        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
++    ) -> Result<UploadedMedia> {
++        // Only the thumbnail is checked here. The playback copy is validated by
++        // its own multiphase upload before any block leaves the process.
++        ensure!(
++            p.video.kind == MediaQuality::Video,
++            "Invalid normal video upload profile"
++        );
++        p.thumbnail.validate(&p.video.aes_key)?;
++        ensure!(
++            p.thumbnail.width <= 320 && p.thumbnail.height <= 320,
++            "Video thumbnail outside limit"
++        );
++        let total = p.thumbnail.encrypted.len();
++        // A 320 px JPEG thumbnail stays inside one small-object request.
++        ensure!(
++            !total.is_empty() && total < MAX_CDN_TRANSFER_BYTES,
++            "Video thumbnail requires multiphase upload"
++        );
++        // The thumbnail is a small side object: report its bytes without a total
++        // so the playback copy's own progress stays the one percentage shown.
++        progress(0, None)?;
++        let mut fields = upload_thumbnail_fields(&self.config, p, 1, 0, total - 1)?;
++        fields.insert("filedata".into(), p.thumbnail.encrypted.clone());
++        let reply = post("/uploadv3", &fields)?;
++        let mut file_id = None;
++        validate_upload_reply(&reply, 1, 0, total - 1, &mut file_id)?;
++        progress(total as u64, None)?;
++        let id = file_id
++            .ok_or_else(|| anyhow::anyhow!("Thumbnail upload returned no file identifier"))?;
++        Ok(uploaded_variant(
++            &p.video,
++            &p.thumbnail,
++            &id,
++            MediaQuality::Thumbnail,
++        ))
++    }
+     fn upload_video_with_transport(
+         &self,
+         p: &PreparedVideoUpload,
+@@ -1479,6 +1633,12 @@ impl CdnClient {
+             p.video.kind == MediaQuality::Video,
+             "Invalid normal video upload profile"
+         );
++        // A single-request object is bounded by the CDN transfer limit. Larger
++        // playback copies need the multiphase protocol and a separate thumbnail.
++        ensure!(
++            !p.video_needs_multiphase(),
++            "Video requires multiphase upload"
++        );
+         p.thumbnail.validate(&p.video.aes_key)?;
+         ensure!(
+             p.thumbnail.width <= 320 && p.thumbnail.height <= 320,
+@@ -2317,7 +2477,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn normal_video_above_fifty_mib_uses_correlated_chunks_with_unchanged_bytes() {
++    fn normal_video_above_fifty_mib_never_enters_the_single_request_path() {
+         let mut video = b"\0\0\0\x0cftypisom".to_vec();
+         video.resize(51 * 1024 * 1024, 0x37);
+         let mut thumbnail = Vec::new();
+@@ -2333,40 +2493,146 @@ mod tests {
+             "00112233445566778899aabbccddeeff",
+         )
+         .unwrap();
+-        let mut offset = 0;
+-        let result = client()
+-            .upload_video_with_transport(
+-                &prepared,
+-                |_, _| Ok(()),
+-                |path, fields| {
+-                    assert_eq!(path, "/uploadv3");
+-                    assert_eq!(integer(fields, "filetype")?, 4);
+-                    assert_eq!(integer(fields, "rangestart")? as usize, offset);
+-                    let chunk = &fields["filedata"];
+-                    assert_eq!(
+-                        chunk,
+-                        &prepared.video.encrypted[offset..offset + chunk.len()]
+-                    );
+-                    assert_eq!(fields.contains_key("thumbdata"), offset == 0);
+-                    offset += chunk.len();
+-                    let mut reply = CdnFields::new();
+-                    put(&mut reply, "retcode", 0);
+-                    for key in ["seq", "rangestart", "rangeend"] {
+-                        reply.insert(key.into(), fields[key].clone());
+-                    }
+-                    reply.insert("fileid".into(), b"synthetic-large-video".to_vec());
+-                    Ok(reply)
+-                },
+-            )
+-            .unwrap();
+-        assert_eq!(offset, prepared.video.encrypted.len());
+-        assert_eq!(result.video.plaintext_bytes as usize, video.len());
++        assert!(prepared.video_needs_multiphase());
+         assert_eq!(
+-            decrypt_cdn(&prepared.video.encrypted, &prepared.video.aes_key).unwrap(),
+-            video
++            client()
++                .upload_video_with_transport(
++                    &prepared,
++                    |_, _| Ok(()),
++                    |_, _| { panic!("Oversized video reached the single-request transport") }
++                )
++                .err()
++                .unwrap()
++                .to_string(),
++            "Video requires multiphase upload"
+         );
+     }
+     #[test]
++    fn video_upload_boundary_requires_multiphase_at_the_transfer_limit() {
++        let mut thumbnail = Vec::new();
++        image::codecs::jpeg::JpegEncoder::new(&mut thumbnail)
++            .encode_image(&image::DynamicImage::new_rgb8(16, 12))
++            .unwrap();
++        for (plaintext, multiphase) in [
++            (MAX_NATIVE_UPLOAD_BYTES, false),
++            (MAX_NATIVE_UPLOAD_BYTES + 1, true),
++        ] {
++            let mut video = b"\0\0\0\x0cftypisom".to_vec();
++            video.resize(plaintext, 0x37);
++            let prepared = PreparedVideoUpload::with_material(
++                &video,
++                &thumbnail,
++                "boundary.mp4",
++                "filehelper",
++                &[0x31; 16],
++                "00112233445566778899aabbccddeeff",
++            )
++            .unwrap();
++            assert_eq!(prepared.video_needs_multiphase(), multiphase);
++            let error = client()
++                .upload_video_with_transport(
++                    &prepared,
++                    |_, _| Ok(()),
++                    |_, _| bail!("single-request upload started for {plaintext} plaintext bytes"),
++                )
++                .err()
++                .unwrap()
++                .to_string();
++            assert_eq!(
++                error,
++                if multiphase {
++                    "Video requires multiphase upload".to_string()
++                } else {
++                    format!("single-request upload started for {plaintext} plaintext bytes")
++                }
++            );
++        }
++    }
++    #[test]
++    fn multiphase_video_thumbnail_is_its_own_type_three_object() {
++        let mut thumbnail = Vec::new();
++        image::codecs::jpeg::JpegEncoder::new(&mut thumbnail)
++            .encode_image(&image::DynamicImage::new_rgb8(24, 18))
++            .unwrap();
++        let prepared = PreparedVideoUpload::with_material(
++            b"\0\0\0\x0cftypisom",
++            &thumbnail,
++            "clip.mp4",
++            "filehelper",
++            &[0x31; 16],
++            "00112233445566778899aabbccddeeff",
++        )
++        .unwrap();
++        assert!(!prepared.video_needs_multiphase());
++        let mut file_keys = Vec::new();
++        for _ in 0..2 {
++            let uploaded = client()
++                .upload_video_thumbnail_with_transport(
++                    &prepared,
++                    |done, total| {
++                        assert_eq!(total, None);
++                        assert!(done <= prepared.thumbnail.encrypted.len() as u64);
++                        Ok(())
++                    },
++                    |path, fields| {
++                        assert_eq!(path, "/uploadv3");
++                        assert_eq!(integer(fields, "filetype")?, 3);
++                        assert_eq!(integer(fields, "hasthumb")?, 0);
++                        assert!(!fields.contains_key("thumbdata"));
++                        assert_eq!(
++                            integer(fields, "totalsize")?,
++                            prepared.thumbnail.encrypted.len() as i64
++                        );
++                        assert_eq!(
++                            integer(fields, "rawtotalsize")?,
++                            i64::from(prepared.thumbnail.plaintext_bytes)
++                        );
++                        assert_eq!(fields["filemd5"], prepared.thumbnail.md5.as_bytes());
++                        assert_eq!(
++                            fields["filedatamd5"],
++                            hex::encode(md5(&prepared.thumbnail.encrypted)).as_bytes()
++                        );
++                        assert_eq!(fields["filedata"], prepared.thumbnail.encrypted);
++                        assert_eq!(
++                            fields["touser"],
++                            encrypt_recipient("filehelper").unwrap().as_bytes()
++                        );
++                        let file_key = std::str::from_utf8(&fields["filekey"]).unwrap().to_string();
++                        assert_eq!(file_key.len(), 32);
++                        assert_ne!(file_key, prepared.video.file_key);
++                        file_keys.push(file_key);
++                        let local_name = std::str::from_utf8(&fields["localname"]).unwrap();
++                        assert!(local_name.ends_with(".jpg"), "Named {local_name}");
++                        let mut reply = CdnFields::new();
++                        put(&mut reply, "retcode", 0);
++                        for key in ["seq", "rangestart", "rangeend"] {
++                            reply.insert(key.into(), fields[key].clone());
++                        }
++                        reply.insert("fileid".into(), b"thumbnail-object".to_vec());
++                        Ok(reply)
++                    },
++                )
++                .unwrap();
++            assert_eq!(uploaded.descriptor.file_id, "thumbnail-object");
++            assert_eq!(uploaded.descriptor.quality, MediaQuality::Thumbnail);
++            assert_eq!(uploaded.descriptor.aes_key, prepared.video.aes_key);
++            assert_eq!(uploaded.plaintext_bytes, prepared.thumbnail.plaintext_bytes);
++            assert_eq!(uploaded.width, Some(prepared.thumbnail.width));
++            assert_eq!(uploaded.height, Some(prepared.thumbnail.height));
++        }
++        // Retries repeat byte-identical requests instead of rotating the key.
++        assert_eq!(file_keys[0], file_keys[1]);
++        let mut corrupted = prepared;
++        corrupted.thumbnail.encrypted[0] ^= 1;
++        assert!(client()
++            .upload_video_thumbnail_with_transport(
++                &corrupted,
++                |_, _| Ok(()),
++                |_, _| { panic!("Corrupted thumbnail reached the transport") }
++            )
++            .is_err());
++    }
++    #[test]
+     fn boundary_matrix_keeps_ciphertext_and_media_kind_limits_separate() {
+         let boundary = MAX_CDN_TRANSFER_BYTES;
+         for (size, padded, legacy) in [
+diff --git a/packages/native-client-rust/crates/wechat-simulator/src/media_adapter.rs b/packages/native-client-rust/crates/wechat-simulator/src/media_adapter.rs
+index 3173979..58f4db0 100644
+--- a/packages/native-client-rust/crates/wechat-simulator/src/media_adapter.rs
++++ b/packages/native-client-rust/crates/wechat-simulator/src/media_adapter.rs
+@@ -152,6 +152,31 @@ impl MediaTransport for SimulatorMedia {
+             original: None,
+         })
+     }
++    fn upload_video_thumbnail(
++        &self,
++        p: &PreparedVideoUpload,
++        progress: Progress<'_>,
++    ) -> Result<UploadedMedia> {
++        let total = p.thumbnail.encrypted.len() as u64;
++        progress(0, None)?;
++        let thumbnail = self.upload_object(
++            &p.video,
++            MediaQuality::Thumbnail,
++            Some(&p.thumbnail),
++            Some((p.thumbnail.width, p.thumbnail.height)),
++        )?;
++        progress(total, None)?;
++        Ok(thumbnail)
++    }
++    fn upload_video_multiphase(
++        &self,
++        p: &PreparedVideoUpload,
++        task_id: u64,
++        progress: Progress<'_>,
++    ) -> Result<UploadedMedia> {
++        ensure!(task_id != 0, "Expected a persisted video task ID");
++        self.upload(&p.video, progress)
++    }
+     fn upload_video_original(
+         &self,
+         prepared: &PreparedUpload,

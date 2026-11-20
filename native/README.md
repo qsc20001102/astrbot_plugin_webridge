@@ -9,12 +9,14 @@
 | Rust | 1.93.1，默认 Cargo 功能 |
 | 构建基础 | 官方 `rust:1.93.1-bookworm`，Dockerfile 固定镜像摘要 |
 | 运行目标 | Linux x86_64，glibc 2.36+ |
-| 补丁（按顺序） | `patches/original-image.patch`、`patches/merged-forward.patch`、`patches/media-lifecycle.patch` |
+| 补丁（按顺序） | `patches/original-image.patch`、`patches/merged-forward.patch`、`patches/media-lifecycle.patch`、`patches/video-multiphase.patch` |
 | 二进制与补丁校验 | `manifest.json` |
 
 媒体补丁保留 JPEG 原始字节；PNG 等图片生成完整尺寸的高质量 JPEG。预览图、缩略图仍分别准备，原图沿用已有 CDN 上传结构分块提交，并检查每块确认、文件 ID、完整长度和取消状态。旧任务的图片准备方式保留，避免改变旧幂等任务的结果。没有添加未经服务端支持的 API 参数。
 
 视频播放副本会优先保留兼容的 H.264/AAC MP4；其他来源按源尺寸和帧率转换编码；取消 50 MiB/约 25 MiB 策略限制和按体积压低码率的处理，收到视频和缩略图不自动下载，详细条件见 [视频说明](../docs/video-quality.md)。清单的 `video_passthrough`、`video_size_policy` 和 `incoming_video_download` 标记与二进制 SHA-256 一起验证。
+
+视频多阶段补丁在发送计划中为普通视频持久化上传任务 ID，并让播放副本密文达到 25 MiB 时改走 `/cdn/{uin}/{seq}/4/apply` 起的分块多阶段上传（filetype 4）。该流程与文件上传相同：apply 取块大小与 `upinfo`，逐块提交并核对偏移、加密块 MD5 和已确认窗口，fin 汇总 etag，complete 取文件 ID；单请求 `/uploadv3` 只接受阈值以下的播放副本，超限时本地直接拒绝，不会把整段字节推给服务端。多阶段 apply 只承载一个对象，缩略图因此单独作为 filetype 3 对象经普通 CDN 路线上传，其 file key 由已持久化素材派生，重试请求保持不变；消息仍按普通视频写入 `cdnvideourl`、`cdnthumburl`、两种 AES 密钥与长度。回读按视频下载路线核对完整长度、大小与摘要。小于阈值的视频继续使用原有配对上传。清单同时记录 `video_multiphase` 和 `video_multiphase_patch_sha256`，回归测试覆盖 25 MiB 前后选择、缩略图字段与重试一致性、多阶段 type-4 报文不含缩略图以及分块字节完整。
 
 媒体生命周期补丁复用 `/uploads`，以可选 `temporary=true` 指定发送暂存。加密源字节存放在账号私有临时目录，元数据和回执仍在 SQLite；所有引用任务确认结束且账号媒体写入完成后延迟清理。正常账号媒体缓存、用户原始文件、可重试和不确定任务保留。旧式持久上传保持原行为。清单同时记录 `temporary_media_sources` 和 `media_lifecycle_patch_sha256`。
 

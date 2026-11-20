@@ -120,6 +120,10 @@ VOICE_ERROR_MESSAGES = {
 }
 
 _VARIANT_RANK = {"original": 0, "standard": 1, "thumbnail": 2}
+# Ciphertext of one CDN upload request. Engine builds without the multiphase
+# video path still advertise a much larger video capability and only fail when
+# the CDN rejects the oversized single request.
+_CDN_SINGLE_REQUEST_LIMIT = 25 * 1024 * 1024
 _NON_TRANSFERABLE_STATES = {
     "available",
     "unavailable",
@@ -2023,6 +2027,16 @@ class NativeClient:
                         if isinstance(prepared, dict)
                         else None
                     )
+                    service_stage = (
+                        failed_result.get("serviceStage")
+                        if isinstance(failed_result, dict)
+                        else None
+                    )
+                    service_code = (
+                        failed_result.get("serviceCode")
+                        if isinstance(failed_result, dict)
+                        else None
+                    )
                     logger.warning(
                         "微信消息适配器 视频任务未完成：job=%s state=%s phase=%s "
                         "error=%s service=%s/%s normal_bytes=%s source_preserved=%s "
@@ -2031,18 +2045,29 @@ class NativeClient:
                         state,
                         phase or "-",
                         value.get("errorCode") or value.get("error_code") or "-",
-                        failed_result.get("serviceStage")
-                        if isinstance(failed_result, dict)
-                        else "-",
-                        failed_result.get("serviceCode")
-                        if isinstance(failed_result, dict)
-                        else "-",
+                        service_stage if service_stage is not None else "-",
+                        service_code if service_code is not None else "-",
                         _progress_text(normal_bytes)
                         if isinstance(normal_bytes, int)
                         else "-",
                         source_preserved if isinstance(source_preserved, bool) else "-",
                         len(data),
                     )
+                    if (
+                        service_stage == "http"
+                        and service_code == 400
+                        and phase == "uploading"
+                        and isinstance(normal_bytes, int)
+                        and normal_bytes > _CDN_SINGLE_REQUEST_LIMIT
+                    ):
+                        logger.warning(
+                            "微信消息适配器 播放副本超过单请求上传上限：normal_bytes=%s "
+                            "大于 %s，服务端已拒绝单请求上传。当前引擎没有多阶段上传路径，"
+                            "需要按 native/build-linux.sh 重建引擎后再发送；"
+                            "原因与边界见 docs/video-quality.md。",
+                            _progress_text(normal_bytes),
+                            _progress_text(_CDN_SINGLE_REQUEST_LIMIT),
+                        )
                 raise inspection(state)
             if state in {"accepted", "completed", "succeeded"}:
                 action = _accepted_media_action(value, kind, voice_chunks)

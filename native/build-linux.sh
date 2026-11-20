@@ -22,6 +22,8 @@ git -C "$work/source" apply --check "$root/native/patches/merged-forward.patch"
 git -C "$work/source" apply "$root/native/patches/merged-forward.patch"
 git -C "$work/source" apply --check "$root/native/patches/media-lifecycle.patch"
 git -C "$work/source" apply "$root/native/patches/media-lifecycle.patch"
+git -C "$work/source" apply --check "$root/native/patches/video-multiphase.patch"
+git -C "$work/source" apply "$root/native/patches/video-multiphase.patch"
 docker run --rm -v "$work/source/packages/native-client-rust:/work" -v "$root:/out" \
   -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}" -e LOCAL_UID="$(id -u)" -e LOCAL_GID="$(id -g)" \
   webridge-native-build:1.93.1 bash -euc '
@@ -49,6 +51,8 @@ manifest["merged_forward"] = True
 manifest["forward_projection"] = "xml-v1"
 manifest["temporary_media_sources"] = True
 manifest["media_lifecycle_patch_sha256"] = hashlib.sha256((root / "native/patches/media-lifecycle.patch").read_bytes()).hexdigest()
+manifest["video_multiphase"] = True
+manifest["video_multiphase_patch_sha256"] = hashlib.sha256((root / "native/patches/video-multiphase.patch").read_bytes()).hexdigest()
 path.write_text(json.dumps(manifest, indent=2) + "\n")
 print("Built Linux x86_64 engine; SHA256:", manifest["sha256"])
 PY

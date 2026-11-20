@@ -225,21 +225,20 @@ state=accepted phase=completed progress=-/- elapsed=22s
 
 ## 仍然存在的边界
 
-本版只优化“送进引擎之前”的输入，没有改 Native 二进制：
-
-- 引擎内部仍是 64 KiB 串行上传。要彻底解决，需要在
-  `wechat-protocol/src/media.rs` 的 `upload_video_with_transport` 里改成一次性
-  POST 或多路并发分块，然后重建引擎。
-- 引擎仍按账号串行处理媒体任务；要并行化，需要把 `run_media_worker` 的账号锁
+- 引擎按账号串行处理媒体任务；要并行化，需要把 `run_media_worker` 的账号锁
   缩小到“提交”阶段，或允许同一账号的多个媒体任务并发。
 - 默认模式仍把整段视频读进 Python 内存一次（上传需要字节）。`transcode=true`
   且来源是本地文件时，走路径模式：ffmpeg 直接从文件读，Python 只读取转码后的
   成片，内存峰值从“源大小”降到“成片大小”。外部 URL 仍会整段读入内存。
-- 画质优先模式不限制成片大小；超长/超大视频仍受引擎的 25 MiB 级上传字段和
-  64 KiB 分块数限制，发送可能很慢或失败，这是引擎边界，不是本插件能消除的。
+- 画质优先模式不限制成片大小。播放副本密文达到 25 MiB 时，重建后的引擎改走
+  CDN 多阶段上传（filetype 4）：`apply`、逐块提交、`fin`、`complete`，缩略图
+  单独作为 filetype 3 对象提交。多阶段上传按服务端返回的 512 KiB/1 MiB 块串行
+  提交，超大视频的耗时仍由账号带宽和服务端接受范围决定。
+- 未重建的旧二进制没有多阶段路径，超限播放副本仍停在单请求 `/uploadv3` 并失败；
+  清单出现 `video_multiphase: true` 才说明装的是重建后的引擎。
 
-另外，仓库里的 `native/patches` **没有包含**当前二进制实际使用的视频策略补丁：
-上游 v1.5.1 的 `media_video.rs` 是 720p/30 + 按体积压码率，而发布二进制里是
-`pad` + CRF 18 + `sourcePreserved`。也就是说，`native/build-linux.sh` 目前
-**无法重建出与发行二进制一致的视频行为**，建议把该补丁补进仓库，避免后续维护
-时回退。
+另外，仓库里的 `native/patches` 已包含当前发行二进制使用的视频策略补丁（在
+`original-image.patch` 内：`media_video.rs` 的 `pad` + CRF 18 + `sourcePreserved`，
+以及取消 50 MiB/约 25 MiB 策略限制）。视频多阶段补丁 `video-multiphase.patch`
+是新增的一步，只有用 `native/build-linux.sh` 重建引擎后才生效；脚本按顺序应用
+全部补丁，并把各自的 SHA-256 写进清单。

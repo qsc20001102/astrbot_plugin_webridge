@@ -105,7 +105,7 @@ class WeBridgePlugin(Star):
                         await manager.reload(saved)
         logger.info(
             "微信消息适配器 已加载集成版：内置 Native，图片与聊天记录收发，视频发送，收到视频忽略；"
-            "构建 integrated-20261119-video-quality"
+            "构建 integrated-20261120-video-multiphase"
         )
 
     async def terminate(self):
