@@ -54,11 +54,11 @@ class _LoggedSendLock:
     async def __aenter__(self):
         started = asyncio.get_running_loop().time()
         if self._lock.locked():
-            logger.info("微信消息适配器 发送队列等待：前一条消息仍在发送")
+            logger.debug("微信消息适配器 发送队列等待：前一条消息仍在发送")
         await self._lock.acquire()
         waited = asyncio.get_running_loop().time() - started
         if waited >= 5:
-            logger.info("微信消息适配器 发送队列等待结束：已等待 %.1f 秒", waited)
+            logger.debug("微信消息适配器 发送队列等待结束：已等待 %.1f 秒", waited)
         return self
 
     async def __aexit__(self, *_):
@@ -527,7 +527,7 @@ class WeBridgeAdapter(Platform):
             raise RuntimeError("微信消息适配器 已停止")
         if self.state is None:
             raise RuntimeError("微信平台尚未就绪，请在微信消息适配器界面完成登录")
-        logger.info(
+        logger.debug(
             "微信消息适配器 收到发送请求：message=%s components=%s",
             source.get("id") if source else None,
             ",".join(type(part).__name__ for part in chain.chain),
@@ -798,7 +798,7 @@ class WeBridgeAdapter(Platform):
                                 before_send=check_current_source,
                             )
                         if not isinstance(part, str):
-                            logger.info(
+                            logger.debug(
                                 "微信消息适配器 媒体发送返回：message=%s kind=%s bytes=%s "
                                 "elapsed=%.1fs",
                                 message_id,

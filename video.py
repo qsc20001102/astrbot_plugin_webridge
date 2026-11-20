@@ -603,14 +603,14 @@ async def _watch_progress(
             if ratio >= milestone:
                 seen.add(milestone)
                 if total and total > 0:
-                    logger.info(
+                    logger.debug(
                         "微信消息适配器 视频转码进度：%.0f%% (%s/%s)",
                         milestone * 100,
                         _human_bytes(int(total * milestone)),
                         _human_bytes(total),
                     )
                 else:
-                    logger.info("微信消息适配器 视频转码进度：%.0f%%", milestone * 100)
+                    logger.debug("微信消息适配器 视频转码进度：%.0f%%", milestone * 100)
 
 
 def _effective_timeout(policy: VideoPolicy, duration: float) -> float:
@@ -699,7 +699,7 @@ async def normalize_video(
                 await asyncio.to_thread(source.write_bytes, data)
                 info = await _probe_file(source, policy)
                 if engine_compatible_meta(_is_mp4(data), len(data), info, policy):
-                    logger.info(
+                    logger.debug(
                         "微信消息适配器 视频快速通道：源文件已兼容，直接复用 "
                         "codec=%s %sx%s %sfps %s",
                         info.video_codec,
@@ -748,7 +748,7 @@ async def normalize_video_path(
             info = await _probe_file(path, policy)
             is_mp4 = await asyncio.to_thread(_is_mp4_file, path)
             if engine_compatible_meta(is_mp4, size, info, policy):
-                logger.info(
+                logger.debug(
                     "微信消息适配器 视频快速通道：源文件已兼容，直接复用 "
                     "codec=%s %sx%s %sfps %s",
                     info.video_codec,

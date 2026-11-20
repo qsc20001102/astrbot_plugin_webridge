@@ -1313,7 +1313,7 @@ class NativeClient:
             asset.get("contentType") == "image/x-wxgf"
             or str(asset.get("format", "")).lower() == "wxgf"
         )
-        logger.info(
+        logger.debug(
             "微信消息适配器 下载图片资产：message=%s asset=%s variant=%s preview=%s",
             asset.get("messageId"),
             asset["id"],
@@ -1763,7 +1763,7 @@ class NativeClient:
             raise ValueError("Native 未提供视频发送能力，请检查服务版本和账号权限")
         if len(data) > min(limit, upload_limit):
             raise ValueError("视频超过 Native 服务允许的大小，未上传或发送")
-        logger.info(
+        logger.debug(
             "微信消息适配器 视频能力：send_max=%s upload_max=%s source_bytes=%s",
             limit,
             upload_limit,
@@ -1795,7 +1795,7 @@ class NativeClient:
             and type(prepared.get("normalBytes")) is int
             and 0 < prepared["normalBytes"] <= VIDEO_PROTOCOL_MAX_BYTES
         ):
-            logger.info(
+            logger.debug(
                 "微信消息适配器 视频画质：source_bytes=%s playback_bytes=%s source_preserved=%s",
                 len(data),
                 prepared.get("normalBytes"),
@@ -1886,7 +1886,7 @@ class NativeClient:
                 "timeout": aiohttp.ClientTimeout(total=upload_budget),
                 "params": {"temporary": "true"},
             }
-            logger.info(
+            logger.debug(
                 "微信消息适配器 视频开始上传到 Native：bytes=%s timeout=%.0fs",
                 len(data),
                 upload_budget,
@@ -1900,7 +1900,7 @@ class NativeClient:
         ):
             raise SendError("upload_identity_mismatch", key)
         if kind == "video":
-            logger.info(
+            logger.debug(
                 "微信消息适配器 视频已上传到 Native：source_id=%s bytes=%s elapsed=%.1fs",
                 source["id"],
                 len(data),
@@ -1949,7 +1949,7 @@ class NativeClient:
                 job_id = value["id"]
                 record_job(job_id)
                 if kind == "video":
-                    logger.info(
+                    logger.debug(
                         "微信消息适配器 视频任务已创建：job=%s source_bytes=%s",
                         job_id,
                         len(data),
@@ -1994,7 +1994,7 @@ class NativeClient:
                 profile = result.get("profileProjection") if isinstance(result, dict) else None
                 ids = result.get("messageIds") if isinstance(result, dict) else None
                 server = value.get("serverMessageId")
-                logger.info(
+                logger.debug(
                     "微信消息适配器 视频任务进度：job=%s state=%s phase=%s "
                     "progress=%s/%s profile=%s server_id=%s ids=%s elapsed=%.0fs",
                     job_id,
