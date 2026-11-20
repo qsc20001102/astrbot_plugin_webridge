@@ -744,6 +744,14 @@ def _progress_text(value) -> str:
     return f"{value}B"
 
 
+def _job_counter(value, result, key):
+    """Transfer counters live at the job root; older builds nested them in result."""
+    counter = value.get(key) if isinstance(value, dict) else None
+    if counter is None and isinstance(result, dict):
+        counter = result.get(key)
+    return counter if type(counter) is int else None
+
+
 def _accepted_media_action(value: dict, kind: str, voice_chunks: list) -> str:
     """Classify an accepted media job without performing I/O.
 
@@ -1981,8 +1989,8 @@ class NativeClient:
             if kind == "video" and (
                 now - last_report >= 15 or phase != last_phase or state != last_state
             ):
-                completed = result.get("completedBytes") if isinstance(result, dict) else None
-                total = result.get("totalBytes") if isinstance(result, dict) else None
+                completed = _job_counter(value, result, "completedBytes")
+                total = _job_counter(value, result, "totalBytes")
                 profile = result.get("profileProjection") if isinstance(result, dict) else None
                 ids = result.get("messageIds") if isinstance(result, dict) else None
                 server = value.get("serverMessageId")
@@ -2007,18 +2015,31 @@ class NativeClient:
                     "分块上传。若日志停在 queued，通常是前一条媒体任务仍占用账号锁。",
                     now - started,
                 )
-            if state in {"failed", "cancelled", "partial", "needs_review"}:
+            if state in {
+                "failed",
+                "cancelled",
+                "partial",
+                "needs_review",
+                "unsupported",
+                "expired",
+            }:
                 if state in {"failed", "cancelled"} and any(
                     c["state"] == "accepted" for c in voice_chunks
                 ):
                     state = "partial"
+                failed_result = value.get("result")
+                if not isinstance(failed_result, dict):
+                    failed_result = {}
+                error_code = (
+                    value.get("errorCode") or value.get("error_code") or "-"
+                )
+                error_detail = failed_result.get("errorDetail")
+                if not isinstance(error_detail, str) or not error_detail:
+                    error_detail = "-"
+                service_stage = failed_result.get("serviceStage")
+                service_code = failed_result.get("serviceCode")
                 if kind == "video":
-                    failed_result = value.get("result")
-                    prepared = (
-                        failed_result.get("videoPreparation")
-                        if isinstance(failed_result, dict)
-                        else None
-                    )
+                    prepared = failed_result.get("videoPreparation")
                     normal_bytes = (
                         prepared.get("normalBytes") if isinstance(prepared, dict) else None
                     )
@@ -2027,24 +2048,15 @@ class NativeClient:
                         if isinstance(prepared, dict)
                         else None
                     )
-                    service_stage = (
-                        failed_result.get("serviceStage")
-                        if isinstance(failed_result, dict)
-                        else None
-                    )
-                    service_code = (
-                        failed_result.get("serviceCode")
-                        if isinstance(failed_result, dict)
-                        else None
-                    )
                     logger.warning(
                         "微信消息适配器 视频任务未完成：job=%s state=%s phase=%s "
-                        "error=%s service=%s/%s normal_bytes=%s source_preserved=%s "
-                        "source_bytes=%s",
+                        "error=%s detail=%s service=%s/%s normal_bytes=%s "
+                        "source_preserved=%s source_bytes=%s",
                         job_id,
                         state,
                         phase or "-",
-                        value.get("errorCode") or value.get("error_code") or "-",
+                        error_code,
+                        error_detail,
                         service_stage if service_stage is not None else "-",
                         service_code if service_code is not None else "-",
                         _progress_text(normal_bytes)
@@ -2068,6 +2080,19 @@ class NativeClient:
                             _progress_text(normal_bytes),
                             _progress_text(_CDN_SINGLE_REQUEST_LIMIT),
                         )
+                else:
+                    logger.warning(
+                        "微信消息适配器 %s任务未完成：job=%s state=%s phase=%s "
+                        "error=%s detail=%s service=%s/%s",
+                        kind,
+                        job_id,
+                        state,
+                        phase or "-",
+                        error_code,
+                        error_detail,
+                        service_stage if service_stage is not None else "-",
+                        service_code if service_code is not None else "-",
+                    )
                 raise inspection(state)
             if state in {"accepted", "completed", "succeeded"}:
                 action = _accepted_media_action(value, kind, voice_chunks)

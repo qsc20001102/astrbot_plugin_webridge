@@ -814,6 +814,13 @@ class WeBridgeAdapter(Platform):
                             "partial",
                         }:
                             state = error.state
+                        elif isinstance(error, SendError) and error.state in {
+                            "unsupported",
+                            "expired",
+                        }:
+                            # The engine rejected the media before submitting it,
+                            # so nothing can be duplicated by a later attempt.
+                            state = "failed"
                         elif isinstance(error, ValueError) or (
                             isinstance(error, NativeAPIError)
                             and 400 <= error.status < 500
