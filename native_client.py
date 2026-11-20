@@ -2042,6 +2042,15 @@ class NativeClient:
                     detail = json.dumps(cdn_failure, ensure_ascii=False, sort_keys=True)
                 else:
                     detail = "-"
+                receipt = failed_result.get("nativeReceipt")
+                if isinstance(receipt, dict):
+                    # A server-rejected submission stores its status and numeric
+                    # service code here; both are safe scalar fields.
+                    detail = (
+                        detail
+                        + " receipt="
+                        + json.dumps(receipt, ensure_ascii=False, sort_keys=True)[:200]
+                    )
                 service_stage = failed_result.get("serviceStage")
                 service_code = failed_result.get("serviceCode")
                 if kind == "video":
